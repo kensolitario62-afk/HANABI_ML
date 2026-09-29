@@ -1,0 +1,2 @@
+# Open the intro video first whenever the site root is requested (e.g. http://solitario_class.com/)
+DirectoryIndex intro.php index.php

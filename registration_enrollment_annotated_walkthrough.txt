@@ -1,0 +1,294 @@
+========================================================================
+ STUDENT REGISTRATION -> ENROLLMENT SYSTEM
+ Annotated Code Walkthrough (explains what each part does)
+========================================================================
+
+This document goes through the important functions one by one and
+explains, in plain language, what each block of code is actually
+doing. Use this alongside the full source code appendix.
+
+
+========================================================================
+ PART 1: STUDENT MODULE - module/student/controller.php
+ (This is where Stage 1, "Registered", happens)
+========================================================================
+
+------------------------------------------------------------------
+FUNCTION: doRegister()
+------------------------------------------------------------------
+WHAT IT DOES:
+  This function runs when the admin clicks the green "Reg" button on
+  a student's row and submits the Register form. It creates the very
+  first row for that student's enrollment for this term.
+
+STEP BY STEP:
+
+  1. Reads the values the admin picked in the form:
+        $SY_ID        - which Academic Year
+        $COURSE_ID    - which Course
+        $YEAR_LEVEL   - 1st Year / 2nd Year / etc.
+        $SEMESTER     - 1st Semester / 2nd Semester / Summer
+        $CATEGORY     - New / Old / Transferee / etc.
+
+  2. Checks that the student is not ALREADY registered for that
+     same Academic Year + Semester combination:
+
+        SELECT ENROLLMENT_ID FROM tblenrollment
+        WHERE S_ID = ... AND SY_ID = ... AND SEMESTER = ...
+
+     This stops the admin from accidentally creating two enrollment
+     records for the same student in the same term.
+
+  3. Figures out who is doing the registering:
+
+        $encodedBy = $_SESSION['UID'];
+
+     This records WHICH admin account created the record, for
+     accountability. The code also double-checks that this UID
+     still actually exists in tblusers before using it - this
+     prevents a database error if a session is stale.
+
+  4. Inserts the new row into tblenrollment:
+
+        INSERT INTO tblenrollment
+        (S_ID, COURSE_ID, SY_ID, SECTION_ID, YEAR_LEVEL, SEMESTER,
+         CATEGORY, CURRICULUM_YR, DATE_RESERVED, DATE_ENROLLED,
+         STATUS, ENCODED_BY)
+        VALUES (..., ..., ..., NULL, ..., ..., ..., ...,
+                <today>, NULL, 'Registered', ...)
+
+     Notice SECTION_ID and DATE_ENROLLED are left NULL/empty on
+     purpose - the student has not been sectioned or fully enrolled
+     yet, those come later. STATUS is explicitly set to
+     'Registered' so the record starts at Stage 1.
+
+  5. Shows a success message and sends the admin to the Enrollment
+     page, where the newly created record is now waiting for the
+     next stage (Assign Subjects).
+
+
+========================================================================
+ PART 2: ENROLLMENT MODULE - module/enrollment/controller.php
+ (Stages 2 through 6 all live here)
+========================================================================
+
+------------------------------------------------------------------
+FUNCTION: doAssign()      -->  Stage 1 -> 2 (Registered -> Assigned)
+------------------------------------------------------------------
+WHAT IT DOES:
+  Runs when the admin checks off subjects in the "Assign Subjects"
+  modal and clicks Save. It records which subjects the student is
+  taking and calculates how much they owe.
+
+STEP BY STEP:
+
+  1. Gets the ENROLLMENT_ID and the list of checked SUBJECT_IDs from
+     the form.
+
+  2. Clears out any subjects that were previously assigned to this
+     enrollment record:
+
+        DELETE FROM tblenrollment_details WHERE ENROLLMENT_ID = ...
+
+     This means running "Assign" again (e.g. to fix a mistake) always
+     replaces the list cleanly instead of stacking duplicates.
+
+  3. Loops through each checked subject. For every one:
+       - Looks up its UNITS and PRICE_PER_UNIT from tblsubjects
+       - Inserts a new row into tblenrollment_details linking this
+         subject to this enrollment
+       - Adds (UNITS x PRICE_PER_UNIT) to a running total
+
+  4. Saves that running total into tblenrollment.AMOUNT_DUE - this
+     is the automatic tuition/fee calculation.
+
+  5. IMPORTANT LOGIC: it only changes STATUS to 'Assigned' if the
+     record's current status is still 'Registered'. If the admin
+     re-runs Assign later (say, to add a subject after the student
+     already paid), it will NOT roll the status backward - it just
+     quietly updates the subject list and the amount due.
+
+
+------------------------------------------------------------------
+FUNCTION: doSectioning()   -->  Stage 2 -> 3 (Assigned -> Sectioned)
+------------------------------------------------------------------
+WHAT IT DOES:
+  Runs when the admin picks a section (Set A/B/C/D) and saves.
+
+STEP BY STEP:
+
+  1. Gets the ENROLLMENT_ID and the chosen SECTION_ID.
+
+  2. SAFETY CHECK #1: looks up the enrollment record's current
+     STATUS. If it is still 'Registered' (meaning subjects have not
+     been assigned yet), it REFUSES and shows an error:
+        "Assign subjects to this student before sectioning."
+     This is one of the guards that stops stages from being skipped.
+
+  3. SAFETY CHECK #2: confirms the chosen section actually belongs
+     to this student's Course AND Academic Year:
+
+        SELECT SECTION_ID FROM tblsections
+        WHERE SECTION_ID = ... AND COURSE_ID = ... AND SY_ID = ...
+
+     This prevents accidentally placing a BSIT student into a
+     section that actually belongs to the BSED program.
+
+  4. Saves the SECTION_ID onto the enrollment record, and (same
+     pattern as Assign) only advances STATUS to 'Sectioned' if it
+     was still 'Assigned' - so re-sectioning later does not undo
+     Payment/Paid progress.
+
+
+------------------------------------------------------------------
+FUNCTION: doPayment()      -->  Stage 3 -> 4 -> 5 (Sectioned -> Paid)
+------------------------------------------------------------------
+WHAT IT DOES:
+  Runs when the cashier records a payment.
+
+STEP BY STEP:
+
+  1. Reads the amount paid, OR (official receipt) number, and the
+     cashier's name from the form.
+
+  2. SAFETY CHECK: refuses the payment if the student hasn't even
+     been sectioned yet (STATUS is still 'Registered' or 'Assigned')
+     - payment is only meaningful once sectioning is done.
+
+  3. Logs this payment as its OWN row in tblpayments:
+
+        INSERT INTO tblpayments
+        (ENROLLMENT_ID, AMOUNT, OR_NUMBER, CASHIER, DATE_PAID)
+
+     This is important: it does NOT just overwrite one "amount paid"
+     number. Every single payment stays as its own permanent record,
+     so if a student pays in three installments, there will be three
+     separate rows showing exactly when and how much was paid, and
+     by which cashier.
+
+  4. Adds this payment to the enrollment's running AMOUNT_PAID total.
+
+  5. THE AUTOMATIC PART: if the new running total is greater than or
+     equal to AMOUNT_DUE, the STATUS is automatically changed to
+     'Paid' - this is not a separate button the admin has to click,
+     it happens by itself the moment the balance reaches zero.
+
+
+------------------------------------------------------------------
+FUNCTION: doEnroll()       -->  Stage 5 -> 6 (Paid -> Enrolled)
+------------------------------------------------------------------
+WHAT IT DOES:
+  Runs when the admin clicks the "Enroll" button - the final step.
+  THIS IS THE MOST IMPORTANT GUARD IN THE WHOLE SYSTEM.
+
+STEP BY STEP:
+
+  1. Gets the ENROLLMENT_ID from the URL.
+
+  2. Looks up the record's CURRENT status directly from the
+     database (not trusting anything sent from the browser):
+
+        SELECT STATUS FROM tblenrollment WHERE ENROLLMENT_ID = ...
+
+  3. THE LOCK: if that status is not exactly 'Paid', the function
+     stops immediately and shows this message:
+
+        "This student has to pay first before they can be enrolled."
+
+     No enrollment happens. This is what makes it impossible for a
+     student to be enrolled without paying - even if someone tried
+     to trigger this action directly through the URL while skipping
+     the interface, the database check would still block it.
+
+  4. If (and only if) the status IS 'Paid', it updates the record:
+
+        UPDATE tblenrollment
+        SET STATUS = 'Enrolled', DATE_ENROLLED = <today>
+
+     The student is now, officially, enrolled.
+
+
+========================================================================
+ PART 3: HOW THE AJAX FILES SUPPORT ALL OF THIS
+========================================================================
+
+------------------------------------------------------------------
+module/enrollment/ajax.php  -->  act = 'assign_data'
+------------------------------------------------------------------
+WHAT IT DOES:
+  When the admin clicks "Assign", the browser asks this endpoint:
+  "What subjects is this course/year level/semester supposed to
+  have, and which ones has this student already picked?"
+
+  It looks up the enrollment's Course, Year Level, and Semester,
+  then queries tblsubjects for anything matching those three values.
+  For each subject found, it also checks tblenrollment_details to
+  see if that subject is already assigned, so the checkbox modal can
+  show it pre-checked. This is what makes the subject list "smart" -
+  a BSIT student only ever sees BSIT subjects for their year/term,
+  never subjects from another program.
+
+------------------------------------------------------------------
+module/enrollment/ajax.php  -->  act = 'payment_data'
+------------------------------------------------------------------
+WHAT IT DOES:
+  When the admin clicks "Payment", this endpoint returns the
+  student's AMOUNT_DUE, AMOUNT_PAID so far, the remaining balance,
+  and the full history of every payment ever logged in tblpayments
+  for that enrollment - so the cashier can see prior payments before
+  recording a new one.
+
+------------------------------------------------------------------
+module/enrollment/ajax.php  -->  act = 'sections'
+------------------------------------------------------------------
+WHAT IT DOES:
+  Returns only the sections that belong to a given Course + Academic
+  Year, so the Sectioning dropdown never shows sections from the
+  wrong program or the wrong year.
+
+------------------------------------------------------------------
+module/enrollment/ajax.php  -->  the main DataTables listing
+------------------------------------------------------------------
+WHAT IT DOES:
+  This builds the big table you see on the Enrollment page. For each
+  row, it checks the record's STATUS and decides which single "next
+  step" button to show:
+
+    STATUS = 'Registered'  ->  show the "Assign" button
+    STATUS = 'Assigned'    ->  show the "Section" button
+    STATUS = 'Sectioned'   ->  show the "Payment" button
+    STATUS = 'Paid'        ->  show the "Enroll" button
+    STATUS = 'Enrolled'    ->  no next-step button, it's done
+
+  This is what makes the interface always show the ONE correct
+  action for wherever that student currently is in the pipeline,
+  instead of showing every button all the time.
+
+
+========================================================================
+ SUMMARY - THE THREE IDEAS THAT MAKE THIS SYSTEM WORK
+========================================================================
+
+  1. EVERY STAGE CHANGE IS CHECKED ON THE SERVER
+     The interface only shows the "correct" button for each stage,
+     but even if that were bypassed, every controller function
+     re-checks the actual STATUS in the database before doing
+     anything. This is what makes the payment-before-enrollment
+     rule actually enforceable, not just a suggestion.
+
+  2. NOTHING IS EVER JUST ONE OVERWRITTEN NUMBER
+     Every payment gets its own permanent row in tblpayments, and
+     every assigned subject gets its own row in
+     tblenrollment_details. Nothing important is stored as a single
+     value that could get silently replaced and lose history.
+
+  3. RE-RUNNING AN EARLIER STAGE DOES NOT UNDO LATER PROGRESS
+     Both doAssign() and doSectioning() only move STATUS forward if
+     the record hasn't already passed that point. This lets an admin
+     go back and fix a subject list or a section assignment later
+     without accidentally resetting a student who has already paid
+     or already been enrolled.
+
+========================================================================
+ END OF WALKTHROUGH
+========================================================================

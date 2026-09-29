@@ -1,0 +1,234 @@
+========================================================================
+ STUDENT REGISTRATION → ENROLLMENT SYSTEM
+ System Documentation
+========================================================================
+
+--------------------------------------------------------------------
+1. OVERVIEW
+--------------------------------------------------------------------
+This system allows an administrator to register a student for a
+school term, assign their subjects, place them in a section, collect
+their payment, and finally mark them as officially enrolled.
+
+The process is split across two modules:
+
+  - STUDENT MODULE   -> where a student's personal record lives, and
+                         where the enrollment process BEGINS
+  - ENROLLMENT MODULE -> where the enrollment process is COMPLETED,
+                          stage by stage
+
+A single enrollment record moves through six stages, in this exact
+order:
+
+  Registered -> Assigned -> Sectioned -> Payment -> Paid -> Enrolled
+
+Each stage is guarded on the server side, meaning the system will not
+allow a record to skip ahead (for example, a student cannot be marked
+"Enrolled" unless their status is already "Paid").
+
+
+--------------------------------------------------------------------
+2. THE FLOW, STAGE BY STAGE
+--------------------------------------------------------------------
+
+STAGE 1: REGISTERED  (starts in the STUDENT module)
+-----------------------------------------------------
+  Where:   Student Module -> click the green "Reg" button on a
+           student's row
+  What happens:
+    - Admin picks Academic Year, Semester, Course, Year Level, and
+      Category (New / Old / Transferee / etc.)
+    - A new row is created in tblenrollment with STATUS = 'Registered'
+    - No section is assigned yet, no subjects are assigned yet, and
+      no payment has been made yet
+    - This is simply "reserving a slot" for the student
+
+STAGE 2: ASSIGNED  (Enrollment module)
+-----------------------------------------------------
+  Where:   Enrollment Module -> click the "Assign" button
+  What happens:
+    - The system shows a checklist of subjects that belong to the
+      student's Course, Year Level, and Semester (pulled from
+      tblsubjects)
+    - Admin checks which subjects the student is taking
+    - Each subject has a UNITS value and a PRICE_PER_UNIT value;
+      the system multiplies these together and adds them all up to
+      calculate the student's AMOUNT_DUE for the term
+    - The checked subjects are saved into tblenrollment_details
+    - STATUS changes to 'Assigned'
+
+STAGE 3: SECTIONED  (Enrollment module)
+-----------------------------------------------------
+  Where:   Enrollment Module -> click the "Section" button
+  What happens:
+    - Admin picks a section (e.g. Set A, Set B, Set C, Set D) from a
+      dropdown that only shows sections belonging to the student's
+      Course and Academic Year
+    - The chosen SECTION_ID is saved on the enrollment record
+    - STATUS changes to 'Sectioned'
+
+STAGE 4: PAYMENT  (Enrollment module)
+-----------------------------------------------------
+  Where:   Enrollment Module -> click the "Payment" button
+  What happens:
+    - The cashier enters an amount paid, an OR (official receipt)
+      number, and their own name
+    - This payment is logged as its own row in tblpayments (so
+      partial/installment payments are all kept on record, not just
+      one final total)
+    - The running total (AMOUNT_PAID) on the enrollment record is
+      updated
+    - The student can pay in multiple visits - each one just adds
+      another row to tblpayments
+
+STAGE 5: PAID  (automatic)
+-----------------------------------------------------
+    - Once AMOUNT_PAID reaches or exceeds AMOUNT_DUE, the system
+      automatically changes STATUS to 'Paid'
+    - This is NOT a manual button - it happens automatically the
+      moment the balance is fully covered
+
+STAGE 6: ENROLLED  (Enrollment module)
+-----------------------------------------------------
+  Where:   Enrollment Module -> click the "Enroll" button
+  What happens:
+    - The system checks STATUS is 'Paid' before allowing this step
+    - If the student has NOT fully paid yet, the system blocks the
+      action and shows a message telling the admin the student must
+      pay first
+    - Once confirmed, STATUS changes to 'Enrolled' and DATE_ENROLLED
+      is stamped with today's date
+    - This is the final, official step - the student is now
+      considered enrolled for the term
+
+
+--------------------------------------------------------------------
+3. WHY IT IS BUILT THIS WAY (KEY DESIGN DECISIONS)
+--------------------------------------------------------------------
+  - Every stage transition is checked on the SERVER, not just hidden
+    in the interface. Even if someone tried to jump straight to the
+    "Enroll" action by typing a URL directly, the system checks the
+    student's actual STATUS in the database first and refuses if the
+    conditions are not met.
+  - Payments are stored as individual, logged transactions (not a
+    single overwritten number), so there is always a paper trail of
+    who collected what payment and when.
+  - Subject prices are calculated automatically from each subject's
+    UNITS and PRICE_PER_UNIT, rather than the admin typing in a
+    total by hand - this avoids manual computation errors.
+
+
+--------------------------------------------------------------------
+4. DATABASE TABLES INVOLVED
+--------------------------------------------------------------------
+
+tblstudent
+-----------------------------------------------------
+  Purpose: stores each student's personal information.
+  Key columns used by this flow:
+    S_ID            - primary key, unique student ID
+    IDNO            - the student's ID number
+    FNAME, MNAME, LNAME, SEX, BDAY   - basic personal info
+    photo           - path to their uploaded photo
+
+tblcourses
+-----------------------------------------------------
+  Purpose: list of academic programs/courses offered
+    (e.g. BSIT, BSED).
+  Key columns:
+    COURSE_ID, COURSE_CODE, COURSE_NAME
+
+tblschoolyear
+-----------------------------------------------------
+  Purpose: list of academic years and their semesters/status.
+  Key columns:
+    SY_ID, SCHOOL_YEAR, SEMESTER, STATUS (Active/Inactive)
+
+tblsections
+-----------------------------------------------------
+  Purpose: the "Set A / Set B / Set C / Set D" groupings students get
+    placed into, tied to a specific Course and School Year.
+  Key columns:
+    SECTION_ID, SECTION_NAME, COURSE_ID, SY_ID, YEAR_LEVEL
+
+tblsubjects
+-----------------------------------------------------
+  Purpose: the list of subjects offered per course/year level/
+    semester (e.g. RE 1, ITC 111, GE 1, etc.).
+  Key columns:
+    SUBJECT_ID, SUBJECT_CODE, SUBJECT_NAME, UNITS, COURSE_ID,
+    YEAR_LEVEL, SEMESTER
+  Column we ADDED:
+    PRICE_PER_UNIT  - the peso rate per unit, used to automatically
+                       calculate how much a student owes once
+                       subjects are assigned
+
+tblenrollment   *** the central table of this whole system ***
+-----------------------------------------------------
+  Purpose: one row per student per term - this is the record that
+    moves through all six stages.
+  Key existing columns:
+    ENROLLMENT_ID, S_ID, COURSE_ID, SY_ID, SECTION_ID, YEAR_LEVEL,
+    SEMESTER, CATEGORY, CURRICULUM_YR, DATE_RESERVED, DATE_ENROLLED,
+    STATUS, ENCODED_BY
+  Columns we ADDED:
+    AMOUNT_DUE   - total cost calculated from assigned subjects
+    AMOUNT_PAID  - running total of everything paid so far
+
+tblenrollment_details   *** NEW TABLE ***
+-----------------------------------------------------
+  Purpose: which subjects a specific enrollment record is taking.
+    One enrollment can have many subjects (one-to-many).
+  Columns:
+    DETAIL_ID, ENROLLMENT_ID (links back to tblenrollment),
+    SUBJECT_ID (links to tblsubjects)
+
+tblpayments   *** NEW TABLE ***
+-----------------------------------------------------
+  Purpose: a running log of every payment made toward an enrollment,
+    so partial/installment payments are all individually recorded.
+  Columns:
+    PAYMENT_ID, ENROLLMENT_ID (links back to tblenrollment),
+    AMOUNT, OR_NUMBER, CASHIER, DATE_PAID
+
+tblgrades
+-----------------------------------------------------
+  Purpose: (already existed) stores grades per enrollment/subject,
+    tied to ENROLLMENT_ID - relevant for a future stage of the
+    system after enrollment is complete.
+
+
+--------------------------------------------------------------------
+5. HOW THE TABLES RELATE (SIMPLIFIED)
+--------------------------------------------------------------------
+
+  tblstudent ----------< tblenrollment >------------ tblcourses
+                              |      |
+                              |      >------------ tblschoolyear
+                              |      >------------ tblsections
+                              |
+                              |----------< tblenrollment_details >---- tblsubjects
+                              |
+                              |----------< tblpayments
+
+
+  (One student can have many enrollment records over time - one per
+   term. One enrollment record can have many subjects, and many
+   payment entries.)
+
+
+--------------------------------------------------------------------
+6. SUMMARY FOR THE REPORT
+--------------------------------------------------------------------
+In short: the Student Module is where an enrollment BEGINS (the
+"Reg" button creates the initial record), and the Enrollment Module
+is where it is carried through the remaining five stages until the
+student is officially enrolled. Two new tables were introduced
+(tblenrollment_details and tblpayments) to properly track which
+subjects a student is taking and how their payments were collected,
+while tblenrollment itself gained two new columns (AMOUNT_DUE and
+AMOUNT_PAID) to track the student's balance throughout the process.
+
+========================================================================
+ END OF DOCUMENT
+========================================================================

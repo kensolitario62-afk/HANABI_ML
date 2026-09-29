@@ -1,0 +1,2837 @@
+========================================================================
+ STUDENT REGISTRATION -> ENROLLMENT SYSTEM
+ Source Code Appendix
+========================================================================
+
+This document contains every file that makes the Registered -> Assigned
+-> Sectioned -> Payment -> Paid -> Enrolled flow work, plus the SQL used
+to set up the required database tables and columns.
+
+
+========================================================================
+ PART 1: DATABASE SETUP (SQL)
+========================================================================
+
+------------------------------------------------------------------------
+ enrollment_flow_migration.sql
+ (adds AMOUNT_DUE/AMOUNT_PAID to tblenrollment, creates tblpayments,
+  adds PRICE_PER_UNIT to tblsubjects, renames Reserved -> Registered)
+------------------------------------------------------------------------
+-- Run this in phpMyAdmin (SQL tab) on your alumni_db database
+
+-- Rename the existing "Reserved" status to "Registered" (Stage 1 renamed)
+UPDATE `tblenrollment` SET `STATUS` = 'Registered' WHERE `STATUS` = 'Reserved';
+
+-- Track the total due and total paid on each enrollment record
+ALTER TABLE `tblenrollment`
+ADD `AMOUNT_DUE` DECIMAL(10,2) NOT NULL DEFAULT 0 AFTER `STATUS`,
+ADD `AMOUNT_PAID` DECIMAL(10,2) NOT NULL DEFAULT 0 AFTER `AMOUNT_DUE`;
+
+-- A proper payment log, so the cashier can record multiple partial payments
+-- with a reference number and see who received each one
+CREATE TABLE `tblpayments` (
+  `PAYMENT_ID` INT(11) NOT NULL AUTO_INCREMENT PRIMARY KEY,
+  `ENROLLMENT_ID` INT(11) NOT NULL,
+  `AMOUNT` DECIMAL(10,2) NOT NULL,
+  `OR_NUMBER` VARCHAR(50) DEFAULT NULL,
+  `CASHIER` VARCHAR(100) DEFAULT NULL,
+  `DATE_PAID` DATE NOT NULL DEFAULT (CURDATE())
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4 COLLATE=utf8mb4_unicode_ci;
+
+-- Price per unit, used to calculate AMOUNT_DUE when subjects are assigned.
+-- Adjust this number to whatever your actual per-unit rate is.
+ALTER TABLE `tblsubjects`
+ADD `PRICE_PER_UNIT` DECIMAL(10,2) NOT NULL DEFAULT 900 AFTER `UNITS`;
+
+
+------------------------------------------------------------------------
+ Enrollment_details and payments tables were created inside the
+ migration above. tblenrollment_details already existed in the school
+ database and stores which subjects belong to which enrollment record:
+
+   CREATE TABLE tblenrollment_details (
+     DETAIL_ID INT AUTO_INCREMENT PRIMARY KEY,
+     ENROLLMENT_ID INT NOT NULL,
+     SUBJECT_ID INT NOT NULL
+   );
+------------------------------------------------------------------------
+
+
+========================================================================
+ PART 2: STUDENT MODULE (module/student/)
+ This is where the enrollment flow BEGINS (Stage 1: Registered)
+========================================================================
+
+------------------------------------------------------------------------
+ module/student/list.php
+------------------------------------------------------------------------
+<?php
+/* Dropdown data for the Register modal. $mydb is set up by
+   include/initialize.php, which template.php has already loaded.
+
+   NOTE: there is no Section field here on purpose. Sectioning is the
+   SECOND stage and happens on the Enrollment screen. */
+global $mydb;
+
+$regSchoolYears = array();
+$mydb->setQuery("SELECT SY_ID, SCHOOL_YEAR, STATUS FROM `tblschoolyear` ORDER BY SCHOOL_YEAR DESC");
+foreach ($mydb->loadResultList() as $r) { $regSchoolYears[] = $r; }
+
+$regCourses = array();
+$mydb->setQuery("SELECT COURSE_ID, COURSE_CODE, COURSE_NAME FROM `tblcourses` WHERE STATUS = 'Active' ORDER BY COURSE_CODE ASC");
+foreach ($mydb->loadResultList() as $r) { $regCourses[] = $r; }
+
+$regYearLevels = array('1st Year', '2nd Year', '3rd Year', '4th Year');
+$regSemesters  = array('1st Semester', '2nd Semester', 'Summer');
+$regCategories = array('New', 'Old', 'Transferee', 'Returnee', 'Shiftee');
+?>
+ <section class="content">
+      <div class="container-fluid">
+         <?php check_message(); ?>
+        <div class="row">
+          <div class="col-12">
+          
+            <div class="card">
+              <div class="card-header">
+                <h3 class="card-title">List of Students</h3>
+              </div>
+
+              <!-- /.card-header -->
+              <div class="card-body">
+                <table id="tblstudent" class="table table-bordered table-striped">
+                  <thead>
+                  <tr>
+                    <th>#</th>
+                    <!-- /`LNAME`, `FNAME`, `MNAME`, `SEX`, `BDAY`-->
+                    <th>LNAME</th>
+                    <th>FNAME</th>
+                    <th>MNAME</th>
+                    <th>SEX</th>
+                      <th>BDAY</th>
+
+                   
+                    <th>Action</th>
+                  </tr>
+                  </thead>
+                  <tbody>
+                  
+                  </tbody>
+                  <tfoot>
+                  
+                  </tfoot>
+                </table>
+                  <div class="btn-group">
+          
+                  <button type="button" class="btn btn-primary" data-toggle="modal" data-target="#AddNewEntry">Add New</button>
+                 
+                </div>
+              </div>
+              <!-- /.card-body -->
+            </div>
+            <!-- /.card -->
+          </div>
+          <!-- /.col -->
+        </div>
+        <!-- /.row -->
+      </div>
+      <!-- /.container-fluid -->
+    </section>
+
+
+<div class="modal fade" id="AddNewEntry">
+        <div class="modal-dialog">
+        <form action="controller.php?action=add" enctype="multipart/form-data" method="POST">
+          <div class="modal-content">
+            <div class="modal-header bg-danger">
+              <h4 class="modal-title"><i class="fa fa-user-plus"></i> &nbsp;Add New Student</h4>
+              <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+                <span aria-hidden="true">&times;</span>
+              </button>
+            </div>
+            <div class="modal-body">
+
+              <div class="text-center mb-3">
+                <img id="img-upload" src="data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='90' height='90'><rect width='100%25' height='100%25' fill='%23e0e0e0'/><text x='50%25' y='50%25' font-size='12' fill='%23888' text-anchor='middle' dy='.3em'>No Photo</text></svg>" width="90" style="border-radius:50%; margin-bottom:8px;">
+                <div class="form-group mb-0">
+                  <label for="imgInp" class="col-form-label col-form-label-sm d-block">Photo</label>
+                  <input type="file" class="form-control-file" name="photo" id="imgInp" accept="image/*">
+                </div>
+              </div>
+
+              <div class="row">
+
+                <div class="col-sm-12">
+                  <div class="form-group">
+                    <label for="IDNO" class="col-form-label col-form-label-sm">Student ID Number</label>
+                    <input type="text" class="form-control form-control-sm" name="IDNO" id="IDNO" placeholder="Enter Student ID Number" required>
+                  </div>
+                </div>
+
+                <div class="col-sm-6">
+                  <div class="form-group">
+                    <label for="FNAME" class="col-form-label col-form-label-sm">First Name</label>
+                    <input type="text" class="form-control form-control-sm" name="FNAME" id="FNAME" placeholder="Enter First Name" required>
+                  </div>
+                </div>
+
+                <div class="col-sm-6">
+                  <div class="form-group">
+                    <label for="MNAME" class="col-form-label col-form-label-sm">Middle Name</label>
+                    <input type="text" class="form-control form-control-sm" name="MNAME" id="MNAME" placeholder="Enter Middle Name" required>
+                  </div>
+                </div>
+
+                <div class="col-sm-6">
+                  <div class="form-group">
+                    <label for="LNAME" class="col-form-label col-form-label-sm">Last Name</label>
+                    <input type="text" class="form-control form-control-sm" name="LNAME" id="LNAME" placeholder="Enter Last Name" required>
+                  </div>
+                </div>
+
+                <div class="col-sm-6">
+                  <div class="form-group">
+                    <label for="SEX" class="col-form-label col-form-label-sm">Select Gender</label>
+                    <select class="form-control form-control-sm" name="SEX" id="SEX" required>
+                      <option value="">Select Gender</option>
+                      <option value="Male">Male</option>
+                      <option value="Female">Female</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div class="col-sm-6">
+                  <div class="form-group">
+                    <label for="BDAY" class="col-form-label col-form-label-sm">Date Started</label>
+                    <input type="date" class="form-control form-control-sm" name="BDAY" id="BDAY" required>
+                  </div>
+                </div>
+
+                <div class="col-sm-6">
+                  <div class="form-group">
+                    <label for="BPLACE" class="col-form-label col-form-label-sm">Birth Place</label>
+                    <input type="text" class="form-control form-control-sm" name="BPLACE" id="BPLACE" placeholder="Enter Birth Place">
+                  </div>
+                </div>
+
+                <div class="col-sm-6">
+                  <div class="form-group">
+                    <label for="AGE" class="col-form-label col-form-label-sm">Age</label>
+                    <input type="number" class="form-control form-control-sm" name="AGE" id="AGE" placeholder="Enter Age" min="0" max="150">
+                  </div>
+                </div>
+
+                <div class="col-sm-6">
+                  <div class="form-group">
+                    <label for="NATIONALITY" class="col-form-label col-form-label-sm">Nationality</label>
+                    <input type="text" class="form-control form-control-sm" name="NATIONALITY" id="NATIONALITY" placeholder="Enter Nationality">
+                  </div>
+                </div>
+
+                <div class="col-sm-6">
+                  <div class="form-group">
+                    <label for="RELIGION" class="col-form-label col-form-label-sm">Religion</label>
+                    <input type="text" class="form-control form-control-sm" name="RELIGION" id="RELIGION" placeholder="Enter Religion">
+                  </div>
+                </div>
+
+                <div class="col-sm-6">
+                  <div class="form-group">
+                    <label for="CONTACT_NO" class="col-form-label col-form-label-sm">Contact Number</label>
+                    <input type="text" class="form-control form-control-sm" name="CONTACT_NO" id="CONTACT_NO" placeholder="Enter Contact Number">
+                  </div>
+                </div>
+
+                <div class="col-sm-12">
+                  <div class="form-group">
+                    <label for="EMAIL" class="col-form-label col-form-label-sm">Email</label>
+                    <input type="email" class="form-control form-control-sm" name="EMAIL" id="EMAIL" placeholder="Enter Email">
+                  </div>
+                </div>
+
+                <div class="col-sm-12">
+                  <div class="form-group">
+                    <label for="HOME_ADD" class="col-form-label col-form-label-sm">Home Address</label>
+                    <textarea class="form-control form-control-sm" name="HOME_ADD" id="HOME_ADD" placeholder="Enter Home Address"></textarea>
+                  </div>
+                </div>
+
+              </div>
+
+            </div>
+            <div class="modal-footer justify-content-between">
+             <button type="button" class="btn btn-default" data-dismiss="modal">Close</button>
+                 <button type="submit" class="btn btn-primary" name="save">Save changes</button>
+             
+            </div>
+          </div>
+          </form>
+          <!-- /.modal-content -->
+        </div>
+        <!-- /.modal-dialog -->
+      </div>
+<!-----END of Add Form---->
+
+
+   <div class="modal fade" id="editEntry">
+        <div class="modal-dialog">
+        <form action="controller.php?action=edit" enctype="multipart/form-data" method="POST">
+          <div class="modal-content">
+            <div class="modal-header bg-danger">
+              <h4 class="modal-title"><i class="fa fa-user-edit"></i> &nbsp;Edit Student</h4>
+              <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+                <span aria-hidden="true">&times;</span>
+              </button>
+            </div>
+            <div class="modal-body">
+
+<!-- carries S_ID of the row being edited. Hidden: it is not something
+     the user should ever see or type into. -->
+<input type="hidden" name="UID" id="UID" value="">
+
+              <!-- Who is being edited, shown read-only at a glance -->
+              <div class="callout callout-danger py-2 mb-3">
+                <div class="row">
+                  <div class="col-sm-5">
+                    <small class="text-muted d-block">ID No.</small>
+                    <strong id="EDIT_IDNO_TEXT">-</strong>
+                  </div>
+                  <div class="col-sm-7">
+                    <small class="text-muted d-block">Student Name</small>
+                    <strong id="EDIT_NAME_TEXT">-</strong>
+                  </div>
+                </div>
+              </div>
+
+              <div class="text-center mb-3">
+                <img id="currentPhoto" src="" width="70" style="display:none; margin-bottom:8px; border-radius:50%;" onerror="this.style.display='none';">
+                <div class="form-group mb-0">
+                  <label for="photo1" class="col-form-label col-form-label-sm d-block">Photo (leave blank to keep current)</label>
+                  <input type="file" class="form-control-file" name="photo1" id="photo1" accept="image/*">
+                </div>
+              </div>
+
+              <div class="row">
+
+                <div class="col-sm-12">
+                  <div class="form-group">
+                    <label for="IDNO1" class="col-form-label col-form-label-sm">Student ID Number</label>
+                    <input type="text" class="form-control form-control-sm" name="IDNO1" id="IDNO1" placeholder="Enter Student ID Number" required>
+                  </div>
+                </div>
+
+                <div class="col-sm-6">
+                  <div class="form-group">
+                    <label for="FNAME1" class="col-form-label col-form-label-sm">First Name</label>
+                    <input type="text" class="form-control form-control-sm" name="FNAME1" id="FNAME1" placeholder="Enter First Name" required>
+                  </div>
+                </div>
+
+                <div class="col-sm-6">
+                  <div class="form-group">
+                    <label for="MNAME1" class="col-form-label col-form-label-sm">Middle Name</label>
+                    <input type="text" class="form-control form-control-sm" name="MNAME1" id="MNAME1" placeholder="Enter Middle Name" required>
+                  </div>
+                </div>
+
+                <div class="col-sm-6">
+                  <div class="form-group">
+                    <label for="LNAME1" class="col-form-label col-form-label-sm">Last Name</label>
+                    <input type="text" class="form-control form-control-sm" name="LNAME1" id="LNAME1" placeholder="Enter Last Name" required>
+                  </div>
+                </div>
+
+                <div class="col-sm-6">
+                  <div class="form-group">
+                    <label for="SEX1" class="col-form-label col-form-label-sm">Select Gender</label>
+                    <select class="form-control form-control-sm" name="SEX1" id="SEX1" required>
+                      <option value="">Select Gender</option>
+                      <option value="Male">Male</option>
+                      <option value="Female">Female</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div class="col-sm-6">
+                  <div class="form-group">
+                    <label for="BDAY1" class="col-form-label col-form-label-sm">Date Started</label>
+                    <input type="date" class="form-control form-control-sm" name="BDAY1" id="BDAY1" required>
+                  </div>
+                </div>
+
+                <div class="col-sm-6">
+                  <div class="form-group">
+                    <label for="BPLACE1" class="col-form-label col-form-label-sm">Birth Place</label>
+                    <input type="text" class="form-control form-control-sm" name="BPLACE1" id="BPLACE1" placeholder="Enter Birth Place">
+                  </div>
+                </div>
+
+                <div class="col-sm-6">
+                  <div class="form-group">
+                    <label for="AGE1" class="col-form-label col-form-label-sm">Age</label>
+                    <input type="number" class="form-control form-control-sm" name="AGE1" id="AGE1" placeholder="Enter Age" min="0" max="150">
+                  </div>
+                </div>
+
+                <div class="col-sm-6">
+                  <div class="form-group">
+                    <label for="NATIONALITY1" class="col-form-label col-form-label-sm">Nationality</label>
+                    <input type="text" class="form-control form-control-sm" name="NATIONALITY1" id="NATIONALITY1" placeholder="Enter Nationality">
+                  </div>
+                </div>
+
+                <div class="col-sm-6">
+                  <div class="form-group">
+                    <label for="RELIGION1" class="col-form-label col-form-label-sm">Religion</label>
+                    <input type="text" class="form-control form-control-sm" name="RELIGION1" id="RELIGION1" placeholder="Enter Religion">
+                  </div>
+                </div>
+
+                <div class="col-sm-6">
+                  <div class="form-group">
+                    <label for="CONTACT_NO1" class="col-form-label col-form-label-sm">Contact Number</label>
+                    <input type="text" class="form-control form-control-sm" name="CONTACT_NO1" id="CONTACT_NO1" placeholder="Enter Contact Number">
+                  </div>
+                </div>
+
+                <div class="col-sm-12">
+                  <div class="form-group">
+                    <label for="EMAIL1" class="col-form-label col-form-label-sm">Email</label>
+                    <input type="email" class="form-control form-control-sm" name="EMAIL1" id="EMAIL1" placeholder="Enter Email">
+                  </div>
+                </div>
+
+                <div class="col-sm-12">
+                  <div class="form-group">
+                    <label for="HOME_ADD1" class="col-form-label col-form-label-sm">Home Address</label>
+                    <textarea class="form-control form-control-sm" name="HOME_ADD1" id="HOME_ADD1" placeholder="Enter Home Address"></textarea>
+                  </div>
+                </div>
+
+              </div>
+
+            </div>
+            <div class="modal-footer justify-content-between">
+             <button type="button" class="btn btn-default" data-dismiss="modal">Close</button>
+                 <button type="submit" class="btn btn-primary" name="edit">Save changes</button>
+             
+            </div>
+          </div>
+          </form>
+          <!-- /.modal-content -->
+        </div>
+        <!-- /.modal-dialog -->
+      </div>
+<!-----END of Edit Form---->
+
+
+<!-----STAGE 1: RESERVE SLOT---->
+<!--
+     Opened by the green Reg button in the Action column.
+
+     This creates the enrollment record with STATUS = Registered. It does
+     NOT assign a section and does NOT set the enrollment date, because
+     at this point in the flow neither is known yet. Both are filled in
+     later from the Enrollment screen (Sectioning).
+-->
+   <div class="modal fade" id="registerEntry">
+        <div class="modal-dialog">
+        <form action="controller.php?action=register" method="POST">
+          <div class="modal-content">
+            <div class="modal-header bg-danger">
+              <h4 class="modal-title"><i class="fa fa-clipboard-check"></i> &nbsp;Register for Enrollment</h4>
+              <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+                <span aria-hidden="true">&times;</span>
+              </button>
+            </div>
+            <div class="modal-body">
+
+              <input type="hidden" name="R_SID" id="R_SID" value="">
+
+              <!-- Who is being reserved. Read only: the student comes from
+                   whichever row's button was clicked, not from typing. -->
+              <div class="callout callout-info py-2 mb-3">
+                <div class="row">
+                  <div class="col-sm-5">
+                    <small class="text-muted d-block">ID No.</small>
+                    <strong id="R_IDNO_TEXT">-</strong>
+                  </div>
+                  <div class="col-sm-7">
+                    <small class="text-muted d-block">Student Name</small>
+                    <strong id="R_NAME_TEXT">-</strong>
+                  </div>
+                </div>
+              </div>
+
+              <div class="row">
+
+                <div class="col-sm-6">
+                  <div class="form-group">
+                    <label for="R_SY" class="col-form-label col-form-label-sm">Academic Year</label>
+                    <select class="form-control form-control-sm" name="R_SY" id="R_SY" required>
+                      <option value="">Select Academic Year</option>
+                      <?php foreach ($regSchoolYears as $sy) { ?>
+                      <option value="<?php echo $sy->SY_ID; ?>"><?php echo htmlspecialchars($sy->SCHOOL_YEAR); ?><?php echo ($sy->STATUS == 'Active') ? ' (Active)' : ''; ?></option>
+                      <?php } ?>
+                    </select>
+                  </div>
+                </div>
+
+                <div class="col-sm-6">
+                  <div class="form-group">
+                    <label for="R_SEMESTER" class="col-form-label col-form-label-sm">Semester</label>
+                    <select class="form-control form-control-sm" name="R_SEMESTER" id="R_SEMESTER" required>
+                      <option value="">Select Semester</option>
+                      <?php foreach ($regSemesters as $sem) { ?>
+                      <option value="<?php echo $sem; ?>"><?php echo $sem; ?></option>
+                      <?php } ?>
+                    </select>
+                  </div>
+                </div>
+
+                <div class="col-sm-12">
+                  <div class="form-group">
+                    <label for="R_COURSE" class="col-form-label col-form-label-sm">Course</label>
+                    <select class="form-control form-control-sm" name="R_COURSE" id="R_COURSE" required>
+                      <option value="">Select Course</option>
+                      <?php foreach ($regCourses as $c) { ?>
+                      <option value="<?php echo $c->COURSE_ID; ?>"><?php echo htmlspecialchars($c->COURSE_CODE.' - '.$c->COURSE_NAME); ?></option>
+                      <?php } ?>
+                    </select>
+                  </div>
+                </div>
+
+                <div class="col-sm-6">
+                  <div class="form-group">
+                    <label for="R_YEARLEVEL" class="col-form-label col-form-label-sm">Year Level</label>
+                    <select class="form-control form-control-sm" name="R_YEARLEVEL" id="R_YEARLEVEL" required>
+                      <option value="">Select Year Level</option>
+                      <?php foreach ($regYearLevels as $yl) { ?>
+                      <option value="<?php echo $yl; ?>"><?php echo $yl; ?></option>
+                      <?php } ?>
+                    </select>
+                  </div>
+                </div>
+
+                <div class="col-sm-6">
+                  <div class="form-group">
+                    <label for="R_CURRICULUM" class="col-form-label col-form-label-sm">Curriculum Yr</label>
+                    <input type="text" class="form-control form-control-sm" name="R_CURRICULUM"
+                           id="R_CURRICULUM" placeholder="e.g. 2023-2024">
+                  </div>
+                </div>
+
+                <div class="col-sm-6">
+                  <div class="form-group">
+                    <label for="R_CATEGORY" class="col-form-label col-form-label-sm">Category</label>
+                    <select class="form-control form-control-sm" name="R_CATEGORY" id="R_CATEGORY" required>
+                      <?php foreach ($regCategories as $cat) { ?>
+                      <option value="<?php echo $cat; ?>"><?php echo $cat; ?></option>
+                      <?php } ?>
+                    </select>
+                  </div>
+                </div>
+
+                <div class="col-sm-6">
+                  <div class="form-group">
+                    <label for="R_DATE_RESERVED" class="col-form-label col-form-label-sm">Date Registered</label>
+                    <input type="date" class="form-control form-control-sm" name="R_DATE_RESERVED"
+                           id="R_DATE_RESERVED" value="<?php echo date('Y-m-d'); ?>" required>
+                  </div>
+                </div>
+
+              </div>
+
+              <div class="callout callout-warning py-2 mb-0">
+                <small>
+                  Section and Date Enrolled are assigned later, from
+                  <strong>Enrollment &gt; Sectioning</strong>. This step only
+                  reserves the slot.
+                </small>
+              </div>
+
+            </div>
+            <div class="modal-footer justify-content-between">
+              <button type="button" class="btn btn-default" data-dismiss="modal">Cancel</button>
+              <button type="submit" class="btn btn-success" name="register"><i class="fa fa-save"></i> Register</button>
+            </div>
+          </div>
+          </form>
+          <!-- /.modal-content -->
+        </div>
+        <!-- /.modal-dialog -->
+      </div>
+<!-----END of Register Form---->
+
+
+
+
+<?php
+
+
+?>
+
+------------------------------------------------------------------------
+ module/student/index.php
+------------------------------------------------------------------------
+<?php
+require_once("../../include/initialize.php");
+// if (!isset($_SESSION['ACCOUNT_ID'])){
+  //    redirect(web_root."/index.php");
+//     }
+
+$view = (isset($_GET['view']) && $_GET['view'] != '') ? $_GET['view'] : '';
+ $title="Student Module"; 
+ $header=$view; 
+switch ($view) {
+  case 'list' :
+    $content    = 'list.php';   
+    break;
+
+  case 'add' :
+    $content    = 'add.php';    
+    break;
+
+  case 'edit' :
+    $content    = 'edit.php';   
+    break;
+    case 'view' :
+    $content    = 'view.php';   
+    break;
+
+  default :
+    $content    = 'list.php';   
+}
+require_once ("../../theme/template.php");
+
+?>
+  
+ <script type="text/javascript">
+        $(document).ready(function() {
+            var t = $('#tblstudent').DataTable( {
+            "processing":true,
+            "serverSide":true,
+            "order":[],
+            "ajax":{
+              url:"<?php echo WEB_ROOT; ?>module/student/ajax.php",
+              type:"POST"
+            },
+                "columnDefs": [ {
+                    "searchable": true,
+                    "orderable": true,
+                    "targets": 1
+                } ],
+                //vertical scroll
+                 "scrollY":        "400px",
+                "scrollCollapse": true,
+                //ordering start at column 2
+               "order": [[ 2, 'asc' ]]
+            } );
+
+                t.on( 'order.dt search.dt', function () {
+                t.column(0, {search:'applied', order:'applied'}).nodes().each( function (cell, i) {
+                    cell.innerHTML = i+1;
+                } );
+            } ).draw();
+         
+        });
+    </script>
+           <script type="text/javascript">
+            $(function () {
+                $('#reservationdate').datetimepicker({
+                    format: 'L'
+                });
+            });
+        </script>
+        <script type="text/javascript">
+          $(document).ready( function() {
+      $(document).on('change', '.btn-file :file', function() {
+    var input = $(this),
+      label = input.val().replace(/\\/g, '/').replace(/.*\//, '');
+    input.trigger('fileselect', [label]);
+    });
+
+    $('.btn-file :file').on('fileselect', function(event, label) {
+        
+        var input = $(this).parents('.input-group').find(':text'),
+            log = label;
+        
+        if( input.length ) {
+            input.val(log);
+        } else {
+            if( log ) alert(log);
+        }
+      
+    });
+    function readURL(input) {
+        if (input.files && input.files[0]) {
+            var reader = new FileReader();
+            
+            reader.onload = function (e) {
+                $('#img-upload').attr('src', e.target.result);
+            }
+            
+            reader.readAsDataURL(input.files[0]);
+        }
+    }
+
+    $("#imgInp").change(function(){
+        readURL(this);
+    });   
+  });
+        </script>
+<script type="text/javascript">
+  $(document).on('click', '.editEntry', function(){
+    var uid = $(this).attr("UID");
+    $.ajax({
+      url:"<?php echo WEB_ROOT; ?>module/student/ajax.php",
+      method:"POST",
+      data:{UID:uid},
+      dataType:"json",
+      success:function(data)
+      {
+       $('#UID').val(data.UID);
+       $('#IDNO1').val(data.IDNO);
+       $('#FNAME1').val(data.FNAME);
+       $('#MNAME1').val(data.MNAME);
+       $('#LNAME1').val(data.LNAME);
+
+       /* Read-only summary shown at the top of the Edit modal, same
+          pattern as the Register modal. */
+       $('#EDIT_IDNO_TEXT').text(data.IDNO ? data.IDNO : '-');
+       $('#EDIT_NAME_TEXT').text($.trim((data.FNAME || '') + ' ' + (data.MNAME || '') + ' ' + (data.LNAME || '')) || '-');
+
+       /* Gender: the stored value has to match one of the <option value>
+          entries exactly, otherwise the select stays on the placeholder.
+          Old rows may hold junk like "Select Gen", so fall back to blank. */
+       var sex = data.SEX ? $.trim(data.SEX) : '';
+       if (sex !== 'Male' && sex !== 'Female') { sex = ''; }
+       $('#SEX1').val(sex);
+
+       /* Date input needs YYYY-MM-DD; ajax.php already normalizes it. */
+       $('#BDAY1').val(data.BDAY ? data.BDAY : '');
+
+       $('#BPLACE1').val(data.BPLACE ? data.BPLACE : '');
+       $('#AGE1').val(data.AGE ? data.AGE : '');
+       $('#NATIONALITY1').val(data.NATIONALITY ? data.NATIONALITY : '');
+       $('#RELIGION1').val(data.RELIGION ? data.RELIGION : '');
+       $('#CONTACT_NO1').val(data.CONTACT_NO ? data.CONTACT_NO : '');
+       $('#HOME_ADD1').val(data.HOME_ADD ? data.HOME_ADD : '');
+       $('#EMAIL1').val(data.EMAIL ? data.EMAIL : '');
+       $('#currentPhoto').attr('src', data.photo ? "<?php echo WEB_ROOT; ?>module/student/" + data.photo : '').toggle(!!data.photo);
+
+       $('#editEntry').modal('show');
+      }
+    })
+  });
+</script>
+
+<script type="text/javascript">
+/* ---------------------------------------------------------------
+   STAGE 1: RESERVE
+   The green Reg button opens the reservation form for that student.
+   No section is picked here - that is Stage 2 on the Enrollment
+   screen, so there is no dependent dropdown to load.
+   --------------------------------------------------------------- */
+$(document).on('click', '.registerEntry', function(){
+  var uid = $(this).attr("UID");
+
+  $.ajax({
+    url:"<?php echo WEB_ROOT; ?>module/student/ajax.php",
+    method:"POST",
+    data:{act:'register_info', UID:uid},
+    dataType:"json",
+    success:function(data)
+    {
+      $('#R_SID').val(data.S_ID);
+      $('#R_IDNO_TEXT').text(data.IDNO ? data.IDNO : '-');
+      $('#R_NAME_TEXT').text(data.FULLNAME ? data.FULLNAME : '-');
+
+      /* Reset first so a previous student's picks never carry over. */
+      $('#R_SEMESTER').val('');
+      $('#R_YEARLEVEL').val('');
+
+      /* Sensible defaults: active school year, the course already on the
+         student record, and the AY label as the curriculum year. */
+      $('#R_SY').val(data.ACTIVE_SY ? data.ACTIVE_SY : '');
+      $('#R_COURSE').val(data.COURSE_ID ? data.COURSE_ID : '');
+      $('#R_CURRICULUM').val(data.ACTIVE_AY ? data.ACTIVE_AY : '');
+      $('#R_CATEGORY').val(data.SUGGEST_CATEGORY ? data.SUGGEST_CATEGORY : 'New');
+
+      $('#registerEntry').modal('show');
+    },
+    error:function()
+    {
+      alert('Could not load the student record.');
+    }
+  });
+});
+</script>
+
+------------------------------------------------------------------------
+ module/student/ajax.php
+------------------------------------------------------------------------
+<?php 
+require_once("../../include/initialize.php");
+global $mydb;
+
+$act = isset($_POST['act']) ? $_POST['act'] : '';
+
+/* -----------------------------------------------------------------
+   STAGE 1 (Register): details for the Register modal.
+
+   The section lookup that used to live here has MOVED to
+   module/enrollment/ajax.php, because sectioning is now the second
+   stage and belongs to the Enrollment screen.
+   ----------------------------------------------------------------- */
+if ($act === 'register_info') {
+
+	$sid = intval($_POST['UID']);
+	$output = array();
+
+	$mydb->setQuery("SELECT * FROM `tblstudent` WHERE S_ID = '".$sid."' LIMIT 1");
+	foreach ($mydb->loadResultList() as $row) {
+		$output['S_ID']      = $row->S_ID;
+		$output['IDNO']      = $row->IDNO;
+		$output['FULLNAME']  = trim($row->LNAME.', '.$row->FNAME.' '.$row->MNAME);
+		$output['COURSE_ID'] = $row->COURSE_ID;
+	}
+
+	/* Default to the school year flagged Active, and offer its label as
+	   the curriculum year, so the clerk is not retyping it every time. */
+	$output['ACTIVE_SY']  = '';
+	$output['ACTIVE_AY']  = '';
+	$mydb->setQuery("SELECT SY_ID, SCHOOL_YEAR FROM `tblschoolyear` WHERE STATUS = 'Active' ORDER BY SY_ID DESC LIMIT 1");
+	foreach ($mydb->loadResultList() as $row) {
+		$output['ACTIVE_SY'] = $row->SY_ID;
+		$output['ACTIVE_AY'] = $row->SCHOOL_YEAR;
+	}
+
+	/* A student who has never been enrolled is New, otherwise Old. Just a
+	   starting suggestion, the clerk can still change it. */
+	$output['SUGGEST_CATEGORY'] = 'New';
+	$mydb->setQuery("SELECT ENROLLMENT_ID FROM `tblenrollment` WHERE S_ID = '".$sid."' LIMIT 1");
+	if ($mydb->num_rows() > 0) {
+		$output['SUGGEST_CATEGORY'] = 'Old';
+	}
+
+	echo json_encode($output);
+	exit;
+}
+
+if (isset($_POST['UID'])) {
+	$output = array();
+	$sid = intval($_POST["UID"]);
+	$query =	"SELECT * FROM `tblstudent` 
+		WHERE S_ID = '".$sid."' 
+		LIMIT 1";
+	$mydb->setQuery($query);
+	$result = $mydb->loadResultList();
+
+	foreach($result as $row)
+	{ 
+		$output["UID"]   = $row->S_ID;
+		$output["IDNO"]  = $row->IDNO;
+		$output["FNAME"] = $row->FNAME;
+		$output["MNAME"] = $row->MNAME;
+		$output["LNAME"] = $row->LNAME;
+		$output["SEX"]   = $row->SEX;
+
+		/* BDAY is a DATE column. An <input type="date"> only accepts
+		   YYYY-MM-DD, so normalize anything odd (0000-00-00, NULL) to
+		   an empty string instead of feeding the input a bad value. */
+		$bday = $row->BDAY;
+		if ($bday === null || $bday == '0000-00-00' || $bday == '') {
+			$output["BDAY"] = '';
+		} else {
+			$output["BDAY"] = substr($bday, 0, 10);
+		}
+
+		$output["BPLACE"] = isset($row->BPLACE) ? $row->BPLACE : '';
+		$output["AGE"] = isset($row->AGE) ? $row->AGE : '';
+		$output["NATIONALITY"] = isset($row->NATIONALITY) ? $row->NATIONALITY : '';
+		$output["RELIGION"] = isset($row->RELIGION) ? $row->RELIGION : '';
+		$output["CONTACT_NO"] = isset($row->CONTACT_NO) ? $row->CONTACT_NO : '';
+		$output["HOME_ADD"] = isset($row->HOME_ADD) ? $row->HOME_ADD : '';
+		$output["EMAIL"] = isset($row->EMAIL) ? $row->EMAIL : '';
+		$output["photo"] = isset($row->photo) ? $row->photo : '';
+	}
+	echo json_encode($output);
+}else{
+	$output = array();
+	$query = "SELECT `S_ID`, `LNAME`, `FNAME`, `MNAME`, `SEX`, `BDAY` FROM `tblstudent`";
+
+	if(isset($_POST["search"]["value"]))
+	{
+	$query .= " where `LNAME` LIKE '%".$_POST["search"]["value"]."%' ";
+	}
+	if(isset($_POST["order"]))
+	{
+		$query .= 'ORDER BY '.$_POST['order']['0']['column'].' '.$_POST['order']['0']['dir'].' ';
+	}
+	else
+	{
+		$query .= 'ORDER BY `S_ID` DESC ';
+	}
+	if($_POST["length"] != -1)
+	{
+		$query .= " LIMIT " . $_POST['start'] . ", " . $_POST['length'] . "";
+	}
+	$mydb->setQuery($query);
+	$cur = $mydb->loadResultList();
+	$data = array();
+	$filtered_rows = $mydb->num_rows();
+	$i = 1;	
+	foreach ($cur as $result) {
+	$sub_array = array();
+		
+		$sub_array[] =$i;
+	
+		$sub_array[] = $result->LNAME;
+		$sub_array[] = $result->FNAME;
+		$sub_array[] = $result->MNAME;
+		$sub_array[] = $result->SEX;
+		$sub_array[] = $result->BDAY;
+		
+		$sub_array[] = '
+
+		<button type="button" name="update" UID="'.$result->S_ID.'" class="btn btn-warning btn-xs editEntry" title="Edit"><span class="fa fa-edit fw-fa"></span></button> 
+		
+		<a href="index.php?view=view&id='.$result->S_ID.'"><button type="button" class="btn btn-info btn-xs" title="View"><span class="fa fa-eye"></span></button></a>
+
+		<button type="button" UID="'.$result->S_ID.'" class="btn btn-success btn-xs registerEntry" title="Register for Enrollment"><span class="fa fa-clipboard-check fw-fa"></span> Reg</button>
+
+		<a href="controller.php?action=delete&id='.$result->S_ID .'"><button type="button" class="btn btn-danger btn-xs SaveReg" title="Delete"><span class="fa fa-trash fw-fa"></span> Del</button></a>
+
+
+		';
+		$data[] = $sub_array;
+	$i = $i + 1;		
+	}
+	function get_total_all_records()
+	{
+		global $mydb;
+		$statement = "SELECT `S_ID`, `LNAME`, `FNAME`, `MNAME`, `SEX`, `BDAY` FROM `tblstudent`";
+		$mydb->setQuery($statement);
+		return $mydb->num_rows();
+	}
+
+	$output = array('data' 			   => $data, 
+					"recordsTotal"	   => $filtered_rows,
+					"recordsFiltered"	=>	get_total_all_records() );
+	echo json_encode($output);
+}
+?>
+
+------------------------------------------------------------------------
+ module/student/controller.php
+------------------------------------------------------------------------
+<?php
+require_once ("../../include/initialize.php");
+	  if (!isset($_SESSION['ACCOUNT_ID'])){
+     // redirect(web_root."admin/index.php");
+     }
+
+$action = (isset($_GET['action']) && $_GET['action'] != '') ? $_GET['action'] : '';
+
+switch ($action) {
+	case 'add' :
+	doInsert();
+	break;
+	
+	case 'edit' :
+	doEdit();
+	break;
+	
+	case 'delete' :
+	doDelete();
+	break;
+
+	case 'register' :
+	doRegister();
+	break;
+	 
+	}
+    
+	function doInsert(){
+  //``IDNO`, `FNAME`, `LNAME`, `MNAME`, `SEX`, `BDAY`
+ 
+		
+	 
+		$student = new Student();
+
+		$IDNO   = $_POST['IDNO'];
+		$FNAME	= $_POST['FNAME'];
+		$LNAME 	= $_POST['LNAME'];
+		$MNAME 		= $_POST['MNAME'];
+		$SEX 		= $_POST['SEX'];
+		$BDAY  = $_POST['BDAY'];
+		$BPLACE = isset($_POST['BPLACE']) ? $_POST['BPLACE'] : '';
+		$AGE = isset($_POST['AGE']) ? $_POST['AGE'] : '';
+		$NATIONALITY = isset($_POST['NATIONALITY']) ? $_POST['NATIONALITY'] : '';
+		$RELIGION = isset($_POST['RELIGION']) ? $_POST['RELIGION'] : '';
+		$CONTACT_NO = isset($_POST['CONTACT_NO']) ? $_POST['CONTACT_NO'] : '';
+		$HOME_ADD = isset($_POST['HOME_ADD']) ? $_POST['HOME_ADD'] : '';
+		$EMAIL = isset($_POST['EMAIL']) ? $_POST['EMAIL'] : '';
+
+		$photo = '';
+		if (isset($_FILES['photo']) && $_FILES['photo']['error'] == 0) {
+			$uploadDir = "image/";
+			if (!is_dir($uploadDir)) { mkdir($uploadDir, 0777, true); }
+			$filename = time() . '_' . basename($_FILES['photo']['name']);
+			move_uploaded_file($_FILES['photo']['tmp_name'], $uploadDir . $filename);
+			$photo = $uploadDir . $filename;
+		}
+		
+
+		$res = $student->find_all_student($IDNO);
+		
+		
+			if ($res >=1) {
+				message("Student IDNO already exist!", "error");
+				redirect('index.php');
+			}else{
+				
+				$student->IDNO = $IDNO;
+				$student->FNAME = $FNAME;
+				$student->LNAME = $LNAME;
+				$student->MNAME 	= $MNAME;
+				$student->SEX 	= $SEX;
+				$student->BDAY 	= $BDAY;
+				$student->BPLACE = $BPLACE;
+				$student->AGE = $AGE;
+				$student->NATIONALITY = $NATIONALITY;
+				$student->RELIGION = $RELIGION;
+				$student->CONTACT_NO = $CONTACT_NO;
+				$student->HOME_ADD = $HOME_ADD;
+				$student->EMAIL = $EMAIL;
+				if ($photo != '') {
+					$student->photo = $photo;
+				}
+				
+				 
+				 $istrue = $student->create(); 
+				 
+				 		if ($istrue == true) {
+					 		message("New Student [". $IDNO ."] has been created successfully!", "success");
+					 		redirect('index.php');
+					 	}else{
+					 		message("No user has been created successfully!", "error");
+					 		redirect('index.php');
+					 	}
+			}	 
+
+	}
+	function doEdit(){
+
+			$student = new Student();
+
+			$UID   = $_POST['UID'];
+
+			//`IDNO`, `FNAME`, `LNAME`, `MNAME`, `SEX`, `BDAY``
+
+			$IDNO   = $_POST['IDNO1'];
+			$FNAME	= $_POST['FNAME1'];
+			$MNAME	= $_POST['MNAME1'];
+			$LNAME	= $_POST['LNAME1'];
+			$SEX	= isset($_POST['SEX1'])  ? $_POST['SEX1']  : '';
+			$BDAY	= isset($_POST['BDAY1']) ? $_POST['BDAY1'] : '';
+			$BPLACE = isset($_POST['BPLACE1']) ? $_POST['BPLACE1'] : '';
+			$AGE = isset($_POST['AGE1']) ? $_POST['AGE1'] : '';
+			$NATIONALITY = isset($_POST['NATIONALITY1']) ? $_POST['NATIONALITY1'] : '';
+			$RELIGION = isset($_POST['RELIGION1']) ? $_POST['RELIGION1'] : '';
+			$CONTACT_NO = isset($_POST['CONTACT_NO1']) ? $_POST['CONTACT_NO1'] : '';
+			$HOME_ADD = isset($_POST['HOME_ADD1']) ? $_POST['HOME_ADD1'] : '';
+			$EMAIL = isset($_POST['EMAIL1']) ? $_POST['EMAIL1'] : '';
+					
+					
+				$student->IDNO = $IDNO;
+				$student->FNAME = $FNAME;
+				$student->MNAME = $MNAME;
+				$student->LNAME = $LNAME;
+				$student->BPLACE = $BPLACE;
+				$student->AGE = $AGE;
+				$student->NATIONALITY = $NATIONALITY;
+				$student->RELIGION = $RELIGION;
+				$student->CONTACT_NO = $CONTACT_NO;
+				$student->HOME_ADD = $HOME_ADD;
+				$student->EMAIL = $EMAIL;
+
+				if (isset($_FILES['photo1']) && $_FILES['photo1']['error'] == 0) {
+					$uploadDir = "image/";
+					if (!is_dir($uploadDir)) { mkdir($uploadDir, 0777, true); }
+					$filename = time() . '_' . basename($_FILES['photo1']['name']);
+					move_uploaded_file($_FILES['photo1']['tmp_name'], $uploadDir . $filename);
+					$student->photo = $uploadDir . $filename;
+				}
+
+				/* Only overwrite gender when a real choice was made, so a blank
+				   dropdown never wipes an existing value. */
+				if ($SEX == 'Male' || $SEX == 'Female') {
+					$student->SEX = $SEX;
+				}
+
+				/* Same guard for the date: an empty date input must not turn a
+				   stored BDAY into 0000-00-00. */
+				if ($BDAY != '') {
+					$student->BDAY = $BDAY;
+				}
+				
+				 
+				 $istrue = $student->update($UID); 
+				 if ($istrue == true){
+				 	
+				 	message("Details has been Updated successfully!", "success");
+				 	redirect('index.php');
+				 	
+				 }else{
+				 	message("No user account has been updated successfully!", "error");
+				 	redirect('index.php');
+				 }
+		
+	
+	}
+
+
+	/* -------------------------------------------------------------------
+	   STAGE 1 of the enrollment flow: RESERVE
+
+	   Creates the tblenrollment row with STATUS = Reserved. SECTION_ID and
+	   DATE_ENROLLED are deliberately left NULL - they get filled in during
+	   Stage 2 (Sectioning) on the Enrollment screen.
+
+	   Ends by sending the user to Enrollment so the new reservation is
+	   right in front of them, ready to be sectioned.
+	   ------------------------------------------------------------------- */
+	function doRegister(){
+
+		global $mydb;
+
+		$S_ID       = isset($_POST['R_SID'])           ? intval($_POST['R_SID'])          : 0;
+		$SY_ID      = isset($_POST['R_SY'])            ? intval($_POST['R_SY'])           : 0;
+		$COURSE_ID  = isset($_POST['R_COURSE'])        ? intval($_POST['R_COURSE'])       : 0;
+		$YEAR_LEVEL = isset($_POST['R_YEARLEVEL'])     ? trim($_POST['R_YEARLEVEL'])      : '';
+		$SEMESTER   = isset($_POST['R_SEMESTER'])      ? trim($_POST['R_SEMESTER'])       : '';
+		$CATEGORY   = isset($_POST['R_CATEGORY'])      ? trim($_POST['R_CATEGORY'])       : 'New';
+		$CURRICULUM = isset($_POST['R_CURRICULUM'])    ? trim($_POST['R_CURRICULUM'])     : '';
+		$RESERVED   = isset($_POST['R_DATE_RESERVED']) ? trim($_POST['R_DATE_RESERVED'])  : '';
+
+		$enrollmentPage = WEB_ROOT.'module/enrollment/index.php';
+
+		if ($S_ID <= 0 || $SY_ID <= 0 || $COURSE_ID <= 0 || $YEAR_LEVEL == '' || $SEMESTER == '') {
+			message("Please complete all the reservation fields.", "error");
+			redirect('index.php');
+			return;
+		}
+
+		if ($RESERVED == '') { $RESERVED = date('Y-m-d'); }
+
+		/* One reservation per student per school year per semester. The
+		   database also enforces this with a unique key, but catching it
+		   here gives a readable message instead of a PDO error. */
+		$mydb->setQuery("SELECT ENROLLMENT_ID FROM `tblenrollment` 
+			WHERE S_ID     = '".$S_ID."' 
+			  AND SY_ID    = '".$SY_ID."' 
+			  AND SEMESTER = '".$mydb->escape_value($SEMESTER)."' 
+			LIMIT 1");
+		if ($mydb->num_rows() >= 1) {
+			message("This student already has a record for that academic year and semester.", "error");
+			redirect('index.php');
+			return;
+		}
+
+		$encodedBy = isset($_SESSION['UID']) ? intval($_SESSION['UID']) : 0;
+
+		/* Guard against a stale/invalid session UID (e.g. after a DB
+		   reset or reimport) causing a foreign key crash here. */
+		if ($encodedBy > 0) {
+			$mydb->setQuery("SELECT UID FROM `tblusers` WHERE UID = '".$encodedBy."' LIMIT 1");
+			if ($mydb->num_rows() < 1) {
+				$encodedBy = 0;
+			}
+		}
+
+		$encodedSql = ($encodedBy > 0) ? "'".$encodedBy."'" : "NULL";
+
+		$curriculumSql = ($CURRICULUM == '') ? "NULL" : "'".$mydb->escape_value($CURRICULUM)."'";
+
+		$sql = "INSERT INTO `tblenrollment` 
+			(`S_ID`, `COURSE_ID`, `SECTION_ID`, `SY_ID`, `YEAR_LEVEL`, `SEMESTER`, 
+			 `CATEGORY`, `CURRICULUM_YR`, `DATE_RESERVED`, `DATE_ENROLLED`, `STATUS`, `ENCODED_BY`) 
+			VALUES ('".$S_ID."', '".$COURSE_ID."', NULL, '".$SY_ID."', 
+			'".$mydb->escape_value($YEAR_LEVEL)."', '".$mydb->escape_value($SEMESTER)."', 
+			'".$mydb->escape_value($CATEGORY)."', ".$curriculumSql.", 
+			'".$mydb->escape_value($RESERVED)."', NULL, 'Reserved', ".$encodedSql.")";
+
+		$istrue = $mydb->InsertThis($sql);
+
+		if ($istrue) {
+
+			/* Keep the student record in step with the course they reserved
+			   for, so the Student list shows the right program. */
+			$mydb->InsertThis("UPDATE `tblstudent` SET `COURSE_ID` = '".$COURSE_ID."' WHERE `S_ID` = '".$S_ID."'");
+
+			message("Slot reserved. Use Sectioning to complete the enrollment.", "success");
+			redirect($enrollmentPage);
+		} else {
+			message("The reservation could not be saved.", "error");
+			redirect('index.php');
+		}
+	}
+
+
+	
+
+
+	function doDelete(){
+		
+				$id = 	$_GET['id'];
+
+				$student = New Student();
+	 		 	$student->delete($id);
+			 
+			message("Student already Deleted!","info");
+			redirect('index.php');
+		
+	}
+
+	
+?>
+
+========================================================================
+ PART 3: ENROLLMENT MODULE (module/enrollment/)
+ This is where Stages 2-6 happen (Assigned -> Sectioned -> Payment ->
+ Paid -> Enrolled)
+========================================================================
+
+------------------------------------------------------------------------
+ module/enrollment/list.php
+------------------------------------------------------------------------
+<?php
+// HIPANAO SOLUTIONS - Enrollment list + Assign + Sectioning + Payment + Enroll
+global $mydb;
+
+$enSchoolYears = array();
+$mydb->setQuery("SELECT SY_ID, SCHOOL_YEAR, STATUS FROM `tblschoolyear` ORDER BY SCHOOL_YEAR DESC");
+foreach ($mydb->loadResultList() as $r) { $enSchoolYears[] = $r; }
+
+$enCourses = array();
+$mydb->setQuery("SELECT COURSE_ID, COURSE_CODE, COURSE_NAME FROM `tblcourses` ORDER BY COURSE_CODE ASC");
+foreach ($mydb->loadResultList() as $r) { $enCourses[] = $r; }
+
+$enYearLevels = array('1st Year', '2nd Year', '3rd Year', '4th Year');
+$enSemesters  = array('1st Semester', '2nd Semester', 'Summer');
+$enCategories = array('New', 'Old', 'Transferee', 'Returnee', 'Shiftee');
+
+/* Every status a record can carry. Registered/Assigned/Sectioned/Paid/Enrolled
+   are the normal pipeline; Dropped/Completed are manual overrides only
+   reachable from the Edit form. */
+$enStatuses = array('Registered', 'Assigned', 'Sectioned', 'Paid', 'Enrolled', 'Dropped', 'Completed');
+
+/* Counters for the filter chips. */
+$statusCounts = array();
+foreach ($enStatuses as $st) {
+	$mydb->setQuery("SELECT ENROLLMENT_ID FROM `tblenrollment` WHERE STATUS = '".$mydb->escape_value($st)."'");
+	$statusCounts[$st] = $mydb->num_rows();
+}
+$mydb->setQuery("SELECT ENROLLMENT_ID FROM `tblenrollment`");
+$cntAll = $mydb->num_rows();
+?>
+<section class="content">
+  <div class="container-fluid">
+    <?php check_message(); ?>
+
+    <!-- The flow, spelled out, so it is obvious which step comes next -->
+    <div class="callout callout-info py-2">
+      <strong>Enrollment flow:</strong>
+      Student &gt; <span class="badge badge-secondary">Registered</span>
+      &nbsp;&rarr;&nbsp; <span class="badge badge-info">Assigned</span>
+      &nbsp;&rarr;&nbsp; <span class="badge badge-primary">Sectioning</span>
+      &nbsp;&rarr;&nbsp; <span class="badge badge-warning">Payment</span>
+      &nbsp;&rarr;&nbsp; <span class="badge" style="background:#6f42c1;color:#fff;">Paid</span>
+      &nbsp;&rarr;&nbsp; <span class="badge badge-success">Enrolled</span>
+    </div>
+
+    <div class="row">
+      <div class="col-12">
+
+        <div class="card">
+          <div class="card-header">
+            <h3 class="card-title">Enrollment Records</h3>
+            <div class="card-tools">
+              <div class="btn-group btn-group-sm flex-wrap" id="statusFilters">
+                <button type="button" class="btn btn-secondary active" data-filter="">All (<?php echo $cntAll; ?>)</button>
+                <?php foreach (array('Registered','Assigned','Sectioned','Paid','Enrolled') as $st) { ?>
+                <button type="button" class="btn btn-outline-secondary" data-filter="<?php echo $st; ?>"><?php echo $st; ?> (<?php echo $statusCounts[$st]; ?>)</button>
+                <?php } ?>
+              </div>
+            </div>
+          </div>
+
+          <div class="card-body">
+            <table id="tblenrollmentlist" class="table table-bordered table-striped" style="width:100%">
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>ID No.</th>
+                  <th>Student Name</th>
+                  <th>Course</th>
+                  <th>Academic Year</th>
+                  <th>Semester</th>
+                  <th>Year Level</th>
+                  <th>Section</th>
+                  <th>Amount Due</th>
+                  <th>Amount Paid</th>
+                  <th>Status</th>
+                  <th>Action</th>
+                </tr>
+              </thead>
+              <tbody></tbody>
+            </table>
+
+            <p class="text-muted mt-2 mb-0">
+              <small>New records start from <strong>Student &gt; Reg</strong>. This screen completes them.</small>
+            </p>
+          </div>
+        </div>
+
+      </div>
+    </div>
+  </div>
+</section>
+
+
+<!-- =================================================================
+     STAGE 2: ASSIGN SUBJECTS
+     Pick which subjects the student is taking this term. The total
+     amount due is calculated live from each subject's unit price.
+     ================================================================= -->
+<div class="modal fade" id="assignModal">
+  <div class="modal-dialog modal-lg">
+    <form action="controller.php?action=assign" method="POST" id="assignForm">
+      <div class="modal-content">
+        <div class="modal-header" style="background:#17a2b8;color:#fff;">
+          <h4 class="modal-title"><i class="fa fa-book"></i> &nbsp;Assign Subjects</h4>
+          <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+            <span aria-hidden="true" style="color:#fff;">&times;</span>
+          </button>
+        </div>
+        <div class="modal-body">
+
+          <input type="hidden" name="A_EID" id="A_EID" value="">
+
+          <div class="callout callout-info py-2 mb-3">
+            <div class="row">
+              <div class="col-sm-4">
+                <small class="text-muted d-block">ID No.</small>
+                <strong id="A_IDNO_TEXT">-</strong>
+              </div>
+              <div class="col-sm-8">
+                <small class="text-muted d-block">Student Name</small>
+                <strong id="A_NAME_TEXT">-</strong>
+              </div>
+            </div>
+          </div>
+
+          <table class="table table-sm table-bordered">
+            <thead>
+              <tr>
+                <th width="10%">Take</th>
+                <th>Code</th>
+                <th>Description</th>
+                <th width="10%">Units</th>
+                <th width="15%">Amount</th>
+              </tr>
+            </thead>
+            <tbody id="A_SUBJECT_ROWS">
+              <tr><td colspan="5" class="text-center text-muted">Loading subjects...</td></tr>
+            </tbody>
+          </table>
+
+          <div class="text-right">
+            <strong>Total Units: <span id="A_TOTAL_UNITS">0</span></strong>
+            &nbsp;&nbsp;
+            <strong>Total Amount Due: &#8369;<span id="A_TOTAL_AMOUNT">0.00</span></strong>
+          </div>
+
+        </div>
+        <div class="modal-footer justify-content-between">
+          <button type="button" class="btn btn-default" data-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-info"><i class="fa fa-check"></i> Save Subjects</button>
+        </div>
+      </div>
+    </form>
+  </div>
+</div>
+
+
+<!-- =================================================================
+     STAGE 3: SECTIONING
+     ================================================================= -->
+<div class="modal fade" id="sectioningModal">
+  <div class="modal-dialog">
+    <form action="controller.php?action=section" method="POST">
+      <div class="modal-content">
+        <div class="modal-header bg-primary">
+          <h4 class="modal-title"><i class="fa fa-chalkboard"></i> &nbsp;Sectioning</h4>
+          <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+            <span aria-hidden="true">&times;</span>
+          </button>
+        </div>
+        <div class="modal-body">
+
+          <input type="hidden" name="SEC_EID" id="SEC_EID" value="">
+          <input type="hidden" name="SEC_COURSE" id="SEC_COURSE" value="">
+          <input type="hidden" name="SEC_SY" id="SEC_SY" value="">
+
+          <div class="callout callout-info py-2 mb-3">
+            <div class="row">
+              <div class="col-sm-4">
+                <small class="text-muted d-block">ID No.</small>
+                <strong id="SEC_IDNO_TEXT">-</strong>
+              </div>
+              <div class="col-sm-8">
+                <small class="text-muted d-block">Student Name</small>
+                <strong id="SEC_NAME_TEXT">-</strong>
+              </div>
+            </div>
+            <div class="row mt-2">
+              <div class="col-sm-6">
+                <small class="text-muted d-block">Course</small>
+                <strong id="SEC_COURSE_TEXT">-</strong>
+              </div>
+              <div class="col-sm-6">
+                <small class="text-muted d-block">AY / Semester</small>
+                <strong id="SEC_TERM_TEXT">-</strong>
+              </div>
+            </div>
+          </div>
+
+          <div class="row">
+            <div class="col-sm-12">
+              <div class="form-group">
+                <label for="SEC_SECTION" class="col-form-label col-form-label-sm">Section</label>
+                <select class="form-control form-control-sm" name="SEC_SECTION" id="SEC_SECTION" required>
+                  <option value="">Loading...</option>
+                </select>
+                <small class="text-muted">Only sections belonging to this course and academic year are listed.</small>
+              </div>
+            </div>
+          </div>
+
+        </div>
+        <div class="modal-footer justify-content-between">
+          <button type="button" class="btn btn-default" data-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-primary" name="section"><i class="fa fa-check"></i> Save Section</button>
+        </div>
+      </div>
+    </form>
+  </div>
+</div>
+
+
+<!-- =================================================================
+     STAGE 4: PAYMENT
+     ================================================================= -->
+<div class="modal fade" id="paymentModal">
+  <div class="modal-dialog">
+    <form action="controller.php?action=pay" method="POST">
+      <div class="modal-content">
+        <div class="modal-header" style="background:#ffc107;">
+          <h4 class="modal-title"><i class="fa fa-cash-register"></i> &nbsp;Payment</h4>
+          <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+            <span aria-hidden="true">&times;</span>
+          </button>
+        </div>
+        <div class="modal-body">
+
+          <input type="hidden" name="P_EID" id="P_EID" value="">
+
+          <div class="callout callout-info py-2 mb-3">
+            <div class="row">
+              <div class="col-sm-4">
+                <small class="text-muted d-block">ID No.</small>
+                <strong id="P_IDNO_TEXT">-</strong>
+              </div>
+              <div class="col-sm-8">
+                <small class="text-muted d-block">Student Name</small>
+                <strong id="P_NAME_TEXT">-</strong>
+              </div>
+            </div>
+          </div>
+
+          <div class="row mb-3">
+            <div class="col-sm-4">
+              <small class="text-muted d-block">Amount Due</small>
+              <strong>&#8369;<span id="P_DUE_TEXT">0.00</span></strong>
+            </div>
+            <div class="col-sm-4">
+              <small class="text-muted d-block">Amount Paid</small>
+              <strong>&#8369;<span id="P_PAID_TEXT">0.00</span></strong>
+            </div>
+            <div class="col-sm-4">
+              <small class="text-muted d-block">Balance</small>
+              <strong class="text-danger">&#8369;<span id="P_BALANCE_TEXT">0.00</span></strong>
+            </div>
+          </div>
+
+          <div class="row">
+            <div class="col-sm-6">
+              <div class="form-group">
+                <label for="P_AMOUNT" class="col-form-label col-form-label-sm">Amount to Pay</label>
+                <input type="number" step="0.01" min="0.01" class="form-control form-control-sm" name="P_AMOUNT" id="P_AMOUNT" required>
+              </div>
+            </div>
+            <div class="col-sm-6">
+              <div class="form-group">
+                <label for="P_OR" class="col-form-label col-form-label-sm">OR Number</label>
+                <input type="text" class="form-control form-control-sm" name="P_OR" id="P_OR" placeholder="e.g. OR-00123">
+              </div>
+            </div>
+            <div class="col-sm-12">
+              <div class="form-group">
+                <label for="P_CASHIER" class="col-form-label col-form-label-sm">Cashier</label>
+                <input type="text" class="form-control form-control-sm" name="P_CASHIER" id="P_CASHIER" placeholder="Enter cashier name" required>
+              </div>
+            </div>
+          </div>
+
+          <div id="P_HISTORY_WRAP" style="display:none;">
+            <hr>
+            <small class="text-muted d-block mb-1">Payment History</small>
+            <table class="table table-sm table-bordered">
+              <thead><tr><th>Date</th><th>Amount</th><th>OR #</th><th>Cashier</th></tr></thead>
+              <tbody id="P_HISTORY_ROWS"></tbody>
+            </table>
+          </div>
+
+        </div>
+        <div class="modal-footer justify-content-between">
+          <button type="button" class="btn btn-default" data-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-warning"><i class="fa fa-save"></i> Record Payment</button>
+        </div>
+      </div>
+    </form>
+  </div>
+</div>
+
+
+<!-- =================================================================
+     EDIT an existing enrollment record
+     ================================================================= -->
+<div class="modal fade" id="editEnrollmentModal">
+  <div class="modal-dialog">
+    <form action="controller.php?action=edit" method="POST">
+      <div class="modal-content">
+        <div class="modal-header bg-warning">
+          <h4 class="modal-title"><i class="fa fa-edit"></i> &nbsp;Edit Enrollment</h4>
+          <button type="button" class="close" data-dismiss="modal" aria-label="Close">
+            <span aria-hidden="true">&times;</span>
+          </button>
+        </div>
+        <div class="modal-body">
+
+          <input type="hidden" name="E_EID" id="E_EID" value="">
+
+          <div class="callout callout-info py-2 mb-3">
+            <div class="row">
+              <div class="col-sm-4">
+                <small class="text-muted d-block">ID No.</small>
+                <strong id="E_IDNO_TEXT">-</strong>
+              </div>
+              <div class="col-sm-8">
+                <small class="text-muted d-block">Student Name</small>
+                <strong id="E_NAME_TEXT">-</strong>
+              </div>
+            </div>
+          </div>
+
+          <div class="row">
+
+            <div class="col-sm-6">
+              <div class="form-group">
+                <label for="E_SY" class="col-form-label col-form-label-sm">Academic Year</label>
+                <select class="form-control form-control-sm" name="E_SY" id="E_SY" required>
+                  <?php foreach ($enSchoolYears as $sy) { ?>
+                  <option value="<?php echo $sy->SY_ID; ?>"><?php echo htmlspecialchars($sy->SCHOOL_YEAR); ?></option>
+                  <?php } ?>
+                </select>
+              </div>
+            </div>
+
+            <div class="col-sm-6">
+              <div class="form-group">
+                <label for="E_SEMESTER" class="col-form-label col-form-label-sm">Semester</label>
+                <select class="form-control form-control-sm" name="E_SEMESTER" id="E_SEMESTER" required>
+                  <?php foreach ($enSemesters as $sem) { ?>
+                  <option value="<?php echo $sem; ?>"><?php echo $sem; ?></option>
+                  <?php } ?>
+                </select>
+              </div>
+            </div>
+
+            <div class="col-sm-12">
+              <div class="form-group">
+                <label for="E_COURSE" class="col-form-label col-form-label-sm">Course</label>
+                <select class="form-control form-control-sm" name="E_COURSE" id="E_COURSE" required>
+                  <?php foreach ($enCourses as $c) { ?>
+                  <option value="<?php echo $c->COURSE_ID; ?>"><?php echo htmlspecialchars($c->COURSE_CODE.' - '.$c->COURSE_NAME); ?></option>
+                  <?php } ?>
+                </select>
+              </div>
+            </div>
+
+            <div class="col-sm-12">
+              <div class="form-group">
+                <label for="E_SECTION" class="col-form-label col-form-label-sm">Section</label>
+                <select class="form-control form-control-sm" name="E_SECTION" id="E_SECTION">
+                  <option value="">Not sectioned yet</option>
+                </select>
+              </div>
+            </div>
+
+            <div class="col-sm-6">
+              <div class="form-group">
+                <label for="E_YEARLEVEL" class="col-form-label col-form-label-sm">Year Level</label>
+                <select class="form-control form-control-sm" name="E_YEARLEVEL" id="E_YEARLEVEL" required>
+                  <?php foreach ($enYearLevels as $yl) { ?>
+                  <option value="<?php echo $yl; ?>"><?php echo $yl; ?></option>
+                  <?php } ?>
+                </select>
+              </div>
+            </div>
+
+            <div class="col-sm-6">
+              <div class="form-group">
+                <label for="E_CURRICULUM" class="col-form-label col-form-label-sm">Curriculum Yr</label>
+                <input type="text" class="form-control form-control-sm" name="E_CURRICULUM" id="E_CURRICULUM" placeholder="e.g. 2023-2024">
+              </div>
+            </div>
+
+            <div class="col-sm-6">
+              <div class="form-group">
+                <label for="E_CATEGORY" class="col-form-label col-form-label-sm">Category</label>
+                <select class="form-control form-control-sm" name="E_CATEGORY" id="E_CATEGORY" required>
+                  <?php foreach ($enCategories as $cat) { ?>
+                  <option value="<?php echo $cat; ?>"><?php echo $cat; ?></option>
+                  <?php } ?>
+                </select>
+              </div>
+            </div>
+
+            <div class="col-sm-6">
+              <div class="form-group">
+                <label for="E_STATUS" class="col-form-label col-form-label-sm">Status</label>
+                <select class="form-control form-control-sm" name="E_STATUS" id="E_STATUS" required>
+                  <?php foreach ($enStatuses as $st) { ?>
+                  <option value="<?php echo $st; ?>"><?php echo $st; ?></option>
+                  <?php } ?>
+                </select>
+                <small class="text-muted">Manually overriding this skips the normal flow guards.</small>
+              </div>
+            </div>
+
+            <div class="col-sm-6">
+              <div class="form-group">
+                <label for="E_DATE_RESERVED" class="col-form-label col-form-label-sm">Date Registered</label>
+                <input type="date" class="form-control form-control-sm" name="E_DATE_RESERVED" id="E_DATE_RESERVED">
+              </div>
+            </div>
+
+            <div class="col-sm-6">
+              <div class="form-group">
+                <label for="E_DATE_ENROLLED" class="col-form-label col-form-label-sm">Date Enrolled</label>
+                <input type="date" class="form-control form-control-sm" name="E_DATE_ENROLLED" id="E_DATE_ENROLLED">
+              </div>
+            </div>
+
+          </div>
+
+        </div>
+        <div class="modal-footer justify-content-between">
+          <button type="button" class="btn btn-default" data-dismiss="modal">Cancel</button>
+          <button type="submit" class="btn btn-warning" name="edit"><i class="fa fa-save"></i> Save changes</button>
+        </div>
+      </div>
+    </form>
+  </div>
+</div>
+
+
+------------------------------------------------------------------------
+ module/enrollment/index.php
+------------------------------------------------------------------------
+<?php
+// HIPANAO SOLUTIONS - Enrollment module entry point
+
+require_once("../../include/initialize.php");
+if (!isset($_SESSION['UID'])) {
+	redirect(WEB_ROOT."login.php");
+}
+
+$title = "Enrollment Module";
+$content = 'list.php';
+require_once("../../theme/template.php");
+?>
+
+<script type="text/javascript">
+$(document).ready(function () {
+
+	var currentFilter = '';
+
+	var table = $('#tblenrollmentlist').DataTable({
+		processing: true,
+		serverSide: true,
+		order: [],
+		ajax: {
+			url: "<?php echo WEB_ROOT; ?>module/enrollment/ajax.php",
+			type: "POST",
+			data: function (d) { d.status_filter = currentFilter; }
+		}
+	});
+
+	/* Status filter chips */
+	$('#statusFilters button').on('click', function () {
+		$('#statusFilters button').removeClass('active');
+		$(this).addClass('active');
+		currentFilter = $(this).data('filter') || '';
+		table.ajax.reload();
+	});
+
+
+	/* -----------------------------------------------------------
+	   STAGE: ASSIGN SUBJECTS
+	   ----------------------------------------------------------- */
+	function renderSubjectRows(subjects) {
+		if (subjects.length < 1) {
+			$('#A_SUBJECT_ROWS').html('<tr><td colspan="5" class="text-center text-muted">No subjects found for this course, year level, and semester.</td></tr>');
+			return;
+		}
+		var html = '';
+		$.each(subjects, function (i, s) {
+			var checked = s.CHECKED ? 'checked' : '';
+			var amount = (s.UNITS * s.PRICE_PER_UNIT).toFixed(2);
+			html += '<tr>' +
+				'<td class="text-center"><input type="checkbox" name="SUBJECTS[]" value="' + s.SUBJECT_ID + '" class="subjectCheck" data-units="' + s.UNITS + '" data-amount="' + amount + '" ' + checked + '></td>' +
+				'<td>' + s.SUBJECT_CODE + '</td>' +
+				'<td>' + s.SUBJECT_NAME + '</td>' +
+				'<td>' + s.UNITS + '</td>' +
+				'<td>&#8369;' + amount + '</td>' +
+				'</tr>';
+		});
+		$('#A_SUBJECT_ROWS').html(html);
+		recalcAssignTotals();
+	}
+
+	function recalcAssignTotals() {
+		var units = 0, amount = 0;
+		$('.subjectCheck:checked').each(function () {
+			units += parseFloat($(this).data('units'));
+			amount += parseFloat($(this).data('amount'));
+		});
+		$('#A_TOTAL_UNITS').text(units);
+		$('#A_TOTAL_AMOUNT').text(amount.toFixed(2));
+	}
+
+	$(document).on('change', '.subjectCheck', recalcAssignTotals);
+
+	$(document).on('click', '.doAssign', function () {
+		var eid = $(this).attr("EID");
+		$('#A_EID').val(eid);
+		$('#A_SUBJECT_ROWS').html('<tr><td colspan="5" class="text-center text-muted">Loading subjects...</td></tr>');
+
+		$.ajax({
+			url: "<?php echo WEB_ROOT; ?>module/enrollment/ajax.php",
+			method: "POST",
+			data: { act: 'assign_data', ENROLLMENT_ID: eid },
+			dataType: "json",
+			success: function (data) {
+				$('#A_IDNO_TEXT').text(data.idno || '-');
+				$('#A_NAME_TEXT').text(data.name || '-');
+				renderSubjectRows(data.subjects);
+				$('#assignModal').modal('show');
+			},
+			error: function () { alert('Could not load the subject list.'); }
+		});
+	});
+
+
+	/* -----------------------------------------------------------
+	   STAGE: SECTIONING
+	   ----------------------------------------------------------- */
+	$(document).on('click', '.doSectioning', function () {
+		var eid = $(this).attr("EID");
+
+		$.ajax({
+			url: "<?php echo WEB_ROOT; ?>module/enrollment/ajax.php",
+			method: "POST",
+			data: { act: 'row', ENROLLMENT_ID: eid },
+			dataType: "json",
+			success: function (data) {
+				$('#SEC_EID').val(data.ENROLLMENT_ID);
+				$('#SEC_COURSE').val(data.COURSE_ID);
+				$('#SEC_SY').val(data.SY_ID);
+				$('#SEC_IDNO_TEXT').text(data.IDNO || '-');
+				$('#SEC_NAME_TEXT').text(data.FULLNAME || '-');
+				$('#SEC_COURSE_TEXT').text(data.COURSE_TEXT || '-');
+				$('#SEC_TERM_TEXT').text((data.SCHOOL_YEAR || '-') + ' / ' + (data.SEMESTER || '-'));
+
+				$('#SEC_SECTION').html('<option value="">Loading...</option>');
+				$.ajax({
+					url: "<?php echo WEB_ROOT; ?>module/enrollment/ajax.php",
+					method: "POST",
+					data: { act: 'sections', COURSE_ID: data.COURSE_ID, SY_ID: data.SY_ID },
+					dataType: "json",
+					success: function (sections) {
+						if (sections.length < 1) {
+							$('#SEC_SECTION').html('<option value="">No sections available for this course/year</option>');
+							return;
+						}
+						var html = '<option value="">Select Section</option>';
+						$.each(sections, function (i, s) {
+							var sel = (String(s.SECTION_ID) === String(data.SECTION_ID)) ? 'selected' : '';
+							html += '<option value="' + s.SECTION_ID + '" ' + sel + '>' + s.SECTION_NAME + ' (' + s.YEAR_LEVEL + ')</option>';
+						});
+						$('#SEC_SECTION').html(html);
+					}
+				});
+
+				$('#sectioningModal').modal('show');
+			},
+			error: function () { alert('Could not load the enrollment record.'); }
+		});
+	});
+
+
+	/* -----------------------------------------------------------
+	   STAGE: PAYMENT
+	   ----------------------------------------------------------- */
+	$(document).on('click', '.doPayment', function () {
+		var eid = $(this).attr("EID");
+
+		$.ajax({
+			url: "<?php echo WEB_ROOT; ?>module/enrollment/ajax.php",
+			method: "POST",
+			data: { act: 'payment_data', ENROLLMENT_ID: eid },
+			dataType: "json",
+			success: function (data) {
+				$('#P_EID').val(eid);
+				$('#P_IDNO_TEXT').text(data.idno || '-');
+				$('#P_NAME_TEXT').text(data.name || '-');
+				$('#P_DUE_TEXT').text(parseFloat(data.due).toFixed(2));
+				$('#P_PAID_TEXT').text(parseFloat(data.paid).toFixed(2));
+				$('#P_BALANCE_TEXT').text(parseFloat(data.balance).toFixed(2));
+				$('#P_AMOUNT').val('').attr('max', data.balance);
+				$('#P_OR').val('');
+				$('#P_CASHIER').val('');
+
+				if (data.history && data.history.length > 0) {
+					var html = '';
+					$.each(data.history, function (i, h) {
+						html += '<tr><td>' + h.DATE + '</td><td>&#8369;' + parseFloat(h.AMOUNT).toFixed(2) + '</td><td>' + (h.OR || '-') + '</td><td>' + (h.CASHIER || '-') + '</td></tr>';
+					});
+					$('#P_HISTORY_ROWS').html(html);
+					$('#P_HISTORY_WRAP').show();
+				} else {
+					$('#P_HISTORY_WRAP').hide();
+				}
+
+				$('#paymentModal').modal('show');
+			},
+			error: function () { alert('Could not load payment information.'); }
+		});
+	});
+
+
+	/* -----------------------------------------------------------
+	   STAGE: ENROLL (locked until Paid)
+	   ----------------------------------------------------------- */
+	$(document).on('click', '.doEnroll', function () {
+		var eid = $(this).attr("EID");
+		if (!confirm('Finalize enrollment for this student?')) { return; }
+		window.location.href = "controller.php?action=enroll&id=" + eid;
+	});
+
+
+	/* -----------------------------------------------------------
+	   EDIT
+	   ----------------------------------------------------------- */
+	$(document).on('click', '.editEnrollment', function () {
+		var eid = $(this).attr("EID");
+
+		$.ajax({
+			url: "<?php echo WEB_ROOT; ?>module/enrollment/ajax.php",
+			method: "POST",
+			data: { act: 'row', ENROLLMENT_ID: eid },
+			dataType: "json",
+			success: function (data) {
+				$('#E_EID').val(data.ENROLLMENT_ID);
+				$('#E_IDNO_TEXT').text(data.IDNO || '-');
+				$('#E_NAME_TEXT').text(data.FULLNAME || '-');
+				$('#E_SY').val(data.SY_ID);
+				$('#E_SEMESTER').val(data.SEMESTER);
+				$('#E_COURSE').val(data.COURSE_ID);
+				$('#E_YEARLEVEL').val(data.YEAR_LEVEL);
+				$('#E_CURRICULUM').val(data.CURRICULUM_YR);
+				$('#E_CATEGORY').val(data.CATEGORY);
+				$('#E_STATUS').val(data.STATUS);
+				$('#E_DATE_RESERVED').val(data.DATE_RESERVED);
+				$('#E_DATE_ENROLLED').val(data.DATE_ENROLLED);
+
+				$('#E_SECTION').html('<option value="">Loading...</option>');
+				$.ajax({
+					url: "<?php echo WEB_ROOT; ?>module/enrollment/ajax.php",
+					method: "POST",
+					data: { act: 'sections', COURSE_ID: data.COURSE_ID, SY_ID: data.SY_ID },
+					dataType: "json",
+					success: function (sections) {
+						var html = '<option value="">Not sectioned</option>';
+						$.each(sections, function (i, s) {
+							var sel = (String(s.SECTION_ID) === String(data.SECTION_ID)) ? 'selected' : '';
+							html += '<option value="' + s.SECTION_ID + '" ' + sel + '>' + s.SECTION_NAME + ' (' + s.YEAR_LEVEL + ')</option>';
+						});
+						$('#E_SECTION').html(html);
+					}
+				});
+
+				$('#editEnrollmentModal').modal('show');
+			},
+			error: function () { alert('Could not load the enrollment record.'); }
+		});
+	});
+
+});
+</script>
+
+
+------------------------------------------------------------------------
+ module/enrollment/ajax.php
+------------------------------------------------------------------------
+<?php
+// HIPANAO SOLUTIONS - Enrollment module data endpoints
+require_once("../../include/initialize.php");
+global $mydb;
+
+$act = isset($_POST['act']) ? $_POST['act'] : '';
+
+/* -----------------------------------------------------------------
+   One enrollment row, for the Sectioning/Edit modals.
+   ----------------------------------------------------------------- */
+if ($act === 'row') {
+
+	$id = intval($_POST['ENROLLMENT_ID']);
+	$output = array();
+
+	$mydb->setQuery("SELECT e.*, 
+			s.IDNO, s.LNAME, s.FNAME, s.MNAME, 
+			c.COURSE_CODE, c.COURSE_NAME, 
+			sy.SCHOOL_YEAR 
+		FROM `tblenrollment` e 
+		JOIN `tblstudent`    s  ON s.S_ID       = e.S_ID 
+		JOIN `tblcourses`    c  ON c.COURSE_ID  = e.COURSE_ID 
+		JOIN `tblschoolyear` sy ON sy.SY_ID     = e.SY_ID 
+		WHERE e.ENROLLMENT_ID = '".$id."' LIMIT 1");
+
+	foreach ($mydb->loadResultList() as $r) {
+		$output['ENROLLMENT_ID'] = $r->ENROLLMENT_ID;
+		$output['S_ID']          = $r->S_ID;
+		$output['IDNO']          = $r->IDNO;
+		$output['FULLNAME']      = trim($r->LNAME.', '.$r->FNAME.' '.$r->MNAME);
+		$output['COURSE_ID']     = $r->COURSE_ID;
+		$output['COURSE_TEXT']   = $r->COURSE_CODE.' - '.$r->COURSE_NAME;
+		$output['SY_ID']         = $r->SY_ID;
+		$output['SCHOOL_YEAR']   = $r->SCHOOL_YEAR;
+		$output['SEMESTER']      = $r->SEMESTER;
+		$output['YEAR_LEVEL']    = $r->YEAR_LEVEL;
+		$output['CATEGORY']      = $r->CATEGORY;
+		$output['CURRICULUM_YR'] = ($r->CURRICULUM_YR === null) ? '' : $r->CURRICULUM_YR;
+		$output['SECTION_ID']    = ($r->SECTION_ID === null) ? '' : $r->SECTION_ID;
+		$output['STATUS']        = $r->STATUS;
+		$output['AMOUNT_DUE']    = $r->AMOUNT_DUE;
+		$output['AMOUNT_PAID']   = $r->AMOUNT_PAID;
+
+		$output['DATE_RESERVED'] = ($r->DATE_RESERVED === null || $r->DATE_RESERVED == '0000-00-00') ? '' : substr($r->DATE_RESERVED, 0, 10);
+		$output['DATE_ENROLLED'] = ($r->DATE_ENROLLED === null || $r->DATE_ENROLLED == '0000-00-00') ? '' : substr($r->DATE_ENROLLED, 0, 10);
+	}
+
+	echo json_encode($output);
+	exit;
+}
+
+/* -----------------------------------------------------------------
+   Subjects available for the Assign modal: every subject that
+   matches this enrollment's course, year level and semester, flagged
+   with whether it is already assigned.
+   ----------------------------------------------------------------- */
+if ($act === 'assign_data') {
+
+	$EID = intval($_POST['ENROLLMENT_ID']);
+	$output = array('subjects' => array(), 'idno' => '', 'name' => '');
+
+	$mydb->setQuery("SELECT e.COURSE_ID, e.YEAR_LEVEL, e.SEMESTER, s.IDNO, s.LNAME, s.FNAME, s.MNAME 
+		FROM `tblenrollment` e 
+		JOIN `tblstudent` s ON s.S_ID = e.S_ID 
+		WHERE e.ENROLLMENT_ID = '".$EID."' LIMIT 1");
+	$rows = $mydb->loadResultList();
+	if (count($rows) < 1) { echo json_encode($output); exit; }
+	$rec = $rows[0];
+
+	$output['idno'] = $rec->IDNO;
+	$output['name'] = trim($rec->LNAME.', '.$rec->FNAME.' '.$rec->MNAME);
+
+	$mydb->setQuery("SELECT SUBJECT_ID FROM `tblenrollment_details` WHERE ENROLLMENT_ID = '".$EID."'");
+	$already = array();
+	foreach ($mydb->loadResultList() as $d) { $already[] = $d->SUBJECT_ID; }
+
+	$mydb->setQuery("SELECT SUBJECT_ID, SUBJECT_CODE, SUBJECT_NAME, UNITS, PRICE_PER_UNIT 
+		FROM `tblsubjects` 
+		WHERE COURSE_ID = '".intval($rec->COURSE_ID)."' 
+		  AND YEAR_LEVEL = '".$mydb->escape_value($rec->YEAR_LEVEL)."' 
+		  AND SEMESTER   = '".$mydb->escape_value($rec->SEMESTER)."' 
+		ORDER BY SUBJECT_CODE ASC");
+
+	foreach ($mydb->loadResultList() as $subj) {
+		$output['subjects'][] = array(
+			'SUBJECT_ID'     => $subj->SUBJECT_ID,
+			'SUBJECT_CODE'   => $subj->SUBJECT_CODE,
+			'SUBJECT_NAME'   => $subj->SUBJECT_NAME,
+			'UNITS'          => $subj->UNITS,
+			'PRICE_PER_UNIT' => $subj->PRICE_PER_UNIT,
+			'CHECKED'        => in_array($subj->SUBJECT_ID, $already)
+		);
+	}
+
+	echo json_encode($output);
+	exit;
+}
+
+/* -----------------------------------------------------------------
+   Payment summary + history for the Payment modal.
+   ----------------------------------------------------------------- */
+if ($act === 'payment_data') {
+
+	$EID = intval($_POST['ENROLLMENT_ID']);
+	$output = array('idno' => '', 'name' => '', 'due' => 0, 'paid' => 0, 'balance' => 0, 'history' => array());
+
+	$mydb->setQuery("SELECT e.AMOUNT_DUE, e.AMOUNT_PAID, s.IDNO, s.LNAME, s.FNAME, s.MNAME 
+		FROM `tblenrollment` e 
+		JOIN `tblstudent` s ON s.S_ID = e.S_ID 
+		WHERE e.ENROLLMENT_ID = '".$EID."' LIMIT 1");
+	$rows = $mydb->loadResultList();
+	if (count($rows) < 1) { echo json_encode($output); exit; }
+	$rec = $rows[0];
+
+	$output['idno']    = $rec->IDNO;
+	$output['name']    = trim($rec->LNAME.', '.$rec->FNAME.' '.$rec->MNAME);
+	$output['due']     = $rec->AMOUNT_DUE;
+	$output['paid']    = $rec->AMOUNT_PAID;
+	$output['balance'] = max(0, $rec->AMOUNT_DUE - $rec->AMOUNT_PAID);
+
+	$mydb->setQuery("SELECT AMOUNT, OR_NUMBER, CASHIER, DATE_PAID FROM `tblpayments` WHERE ENROLLMENT_ID = '".$EID."' ORDER BY PAYMENT_ID DESC");
+	foreach ($mydb->loadResultList() as $p) {
+		$output['history'][] = array(
+			'DATE'    => $p->DATE_PAID,
+			'AMOUNT'  => $p->AMOUNT,
+			'OR'      => $p->OR_NUMBER,
+			'CASHIER' => $p->CASHIER
+		);
+	}
+
+	echo json_encode($output);
+	exit;
+}
+
+/* -----------------------------------------------------------------
+   Sections available for a given course + school year.
+   ----------------------------------------------------------------- */
+if ($act === 'sections') {
+
+	$course = intval($_POST['COURSE_ID']);
+	$sy     = intval($_POST['SY_ID']);
+	$rows   = array();
+
+	if ($course > 0 && $sy > 0) {
+		$mydb->setQuery("SELECT SECTION_ID, SECTION_NAME, YEAR_LEVEL 
+			FROM `tblsections` 
+			WHERE COURSE_ID = '".$course."' AND SY_ID = '".$sy."' 
+			ORDER BY YEAR_LEVEL ASC, SECTION_NAME ASC");
+		foreach ($mydb->loadResultList() as $row) {
+			$rows[] = array(
+				'SECTION_ID'   => $row->SECTION_ID,
+				'SECTION_NAME' => $row->SECTION_NAME,
+				'YEAR_LEVEL'   => $row->YEAR_LEVEL
+			);
+		}
+	}
+
+	echo json_encode($rows);
+	exit;
+}
+
+/* -----------------------------------------------------------------
+   DataTables list
+   ----------------------------------------------------------------- */
+$base = "FROM `tblenrollment` e 
+	JOIN `tblstudent`     s   ON s.S_ID      = e.S_ID 
+	JOIN `tblcourses`     c   ON c.COURSE_ID = e.COURSE_ID 
+	JOIN `tblschoolyear`  sy  ON sy.SY_ID    = e.SY_ID 
+	LEFT JOIN `tblsections` sec ON sec.SECTION_ID = e.SECTION_ID ";
+
+$where = " WHERE 1=1 ";
+
+$filter = isset($_POST['status_filter']) ? trim($_POST['status_filter']) : '';
+if ($filter !== '') {
+	$where .= " AND e.STATUS = '".$mydb->escape_value($filter)."' ";
+}
+
+if (isset($_POST["search"]["value"]) && $_POST["search"]["value"] != '') {
+	$s = $mydb->escape_value($_POST["search"]["value"]);
+	$where .= " AND (s.LNAME LIKE '%".$s."%' 
+				 OR s.FNAME LIKE '%".$s."%' 
+				 OR s.IDNO  LIKE '%".$s."%' 
+				 OR c.COURSE_CODE LIKE '%".$s."%' 
+				 OR e.STATUS LIKE '%".$s."%') ";
+}
+
+$orderCols = array(
+	0 => 'e.ENROLLMENT_ID',
+	1 => 's.IDNO',
+	2 => 's.LNAME',
+	3 => 'c.COURSE_CODE',
+	4 => 'sy.SCHOOL_YEAR',
+	5 => 'e.SEMESTER',
+	6 => 'e.YEAR_LEVEL',
+	7 => 'sec.SECTION_NAME',
+	8 => 'e.AMOUNT_DUE',
+	9 => 'e.AMOUNT_PAID',
+	10 => 'e.STATUS'
+);
+
+$orderBy = " ORDER BY e.ENROLLMENT_ID DESC ";
+if (isset($_POST['order'][0]['column'])) {
+	$ci = intval($_POST['order'][0]['column']);
+	$dir = (isset($_POST['order'][0]['dir']) && strtolower($_POST['order'][0]['dir']) == 'asc') ? 'ASC' : 'DESC';
+	if (isset($orderCols[$ci])) {
+		$orderBy = " ORDER BY ".$orderCols[$ci]." ".$dir." ";
+	}
+}
+
+$limit = "";
+if (isset($_POST['length']) && $_POST['length'] != -1) {
+	$limit = " LIMIT ".intval($_POST['start']).", ".intval($_POST['length'])." ";
+}
+
+$select = "SELECT e.ENROLLMENT_ID, e.YEAR_LEVEL, e.SEMESTER, e.CATEGORY, e.CURRICULUM_YR, 
+		e.DATE_RESERVED, e.DATE_ENROLLED, e.STATUS, e.AMOUNT_DUE, e.AMOUNT_PAID, 
+		s.IDNO, s.LNAME, s.FNAME, s.MNAME, 
+		c.COURSE_CODE, sy.SCHOOL_YEAR, sec.SECTION_NAME ";
+
+$mydb->setQuery($select.$base.$where.$orderBy.$limit);
+$rows = $mydb->loadResultList();
+
+$mydb->setQuery("SELECT e.ENROLLMENT_ID ".$base.$where);
+$filtered = $mydb->num_rows();
+
+$mydb->setQuery("SELECT ENROLLMENT_ID FROM `tblenrollment`");
+$total = $mydb->num_rows();
+
+$data = array();
+$i = isset($_POST['start']) ? intval($_POST['start']) + 1 : 1;
+
+foreach ($rows as $r) {
+
+	$statusClass = 'secondary';
+	if ($r->STATUS == 'Registered') { $statusClass = 'secondary'; }
+	if ($r->STATUS == 'Assigned')   { $statusClass = 'info'; }
+	if ($r->STATUS == 'Sectioned')  { $statusClass = 'primary'; }
+	if ($r->STATUS == 'Paid')       { $statusClass = 'purple'; }
+	if ($r->STATUS == 'Enrolled')   { $statusClass = 'success'; }
+	if ($r->STATUS == 'Dropped')    { $statusClass = 'danger'; }
+	if ($r->STATUS == 'Completed')  { $statusClass = 'dark'; }
+
+	$statusStyle = ($statusClass == 'purple') ? ' style="background:#6f42c1;color:#fff;"' : '';
+	$statusBadgeClass = ($statusClass == 'purple') ? 'badge' : 'badge badge-'.$statusClass;
+
+	$section = ($r->SECTION_NAME === null || $r->SECTION_NAME == '')
+		? '<span class="text-muted">Not sectioned</span>'
+		: htmlspecialchars($r->SECTION_NAME);
+
+	/* Only one "next step" button is shown at a time, matching the
+	   stage the record is currently sitting at. */
+	$stageBtn = '';
+	if ($r->STATUS == 'Registered') {
+		$stageBtn = '<button type="button" EID="'.$r->ENROLLMENT_ID.'" class="btn btn-info btn-xs doAssign" title="Assign Subjects">
+			<span class="fa fa-book fw-fa"></span> Assign
+		</button>';
+	} elseif ($r->STATUS == 'Assigned') {
+		$stageBtn = '<button type="button" EID="'.$r->ENROLLMENT_ID.'" class="btn btn-primary btn-xs doSectioning" title="Sectioning">
+			<span class="fa fa-chalkboard fw-fa"></span> Section
+		</button>';
+	} elseif ($r->STATUS == 'Sectioned') {
+		$stageBtn = '<button type="button" EID="'.$r->ENROLLMENT_ID.'" class="btn btn-warning btn-xs doPayment" title="Payment">
+			<span class="fa fa-cash-register fw-fa"></span> Payment
+		</button>';
+	} elseif ($r->STATUS == 'Paid') {
+		$stageBtn = '<button type="button" EID="'.$r->ENROLLMENT_ID.'" class="btn btn-success btn-xs doEnroll" title="Enroll">
+			<span class="fa fa-user-check fw-fa"></span> Enroll
+		</button>';
+	}
+
+	/* Assign and Payment stay reachable even later, so a subject can be
+	   corrected or an additional payment logged after the main step. */
+	$secondaryBtns = '';
+	if ($r->STATUS == 'Sectioned' || $r->STATUS == 'Paid' || $r->STATUS == 'Enrolled') {
+		$secondaryBtns .= '<button type="button" EID="'.$r->ENROLLMENT_ID.'" class="btn btn-outline-info btn-xs doAssign" title="Edit Subjects">
+			<span class="fa fa-book fw-fa"></span>
+		</button>';
+	}
+	if ($r->STATUS == 'Sectioned' || $r->STATUS == 'Paid') {
+		$secondaryBtns .= '<button type="button" EID="'.$r->ENROLLMENT_ID.'" class="btn btn-outline-warning btn-xs doPayment" title="Payment">
+			<span class="fa fa-cash-register fw-fa"></span>
+		</button>';
+	}
+
+	$actions = '
+		'.$stageBtn.'
+		'.$secondaryBtns.'
+		<button type="button" EID="'.$r->ENROLLMENT_ID.'" class="btn btn-warning btn-xs editEnrollment" title="Edit">
+			<span class="fa fa-edit fw-fa"></span>
+		</button>
+		<a href="controller.php?action=delete&id='.$r->ENROLLMENT_ID.'" onclick="return confirm(\'Delete this enrollment record?\');">
+			<button type="button" class="btn btn-danger btn-xs" title="Delete"><span class="fa fa-trash fw-fa"></span></button>
+		</a>';
+
+	$data[] = array(
+		$i,
+		htmlspecialchars($r->IDNO),
+		htmlspecialchars(trim($r->LNAME.', '.$r->FNAME.' '.$r->MNAME)),
+		htmlspecialchars($r->COURSE_CODE),
+		htmlspecialchars($r->SCHOOL_YEAR),
+		htmlspecialchars($r->SEMESTER),
+		htmlspecialchars($r->YEAR_LEVEL),
+		$section,
+		'&#8369;'.number_format($r->AMOUNT_DUE, 2),
+		'&#8369;'.number_format($r->AMOUNT_PAID, 2),
+		'<span class="'.$statusBadgeClass.'"'.$statusStyle.'>'.htmlspecialchars($r->STATUS).'</span>',
+		$actions
+	);
+	$i++;
+}
+
+echo json_encode(array(
+	'data'            => $data,
+	'recordsTotal'    => $total,
+	'recordsFiltered' => $filtered
+));
+?>
+
+
+------------------------------------------------------------------------
+ module/enrollment/controller.php
+------------------------------------------------------------------------
+<?php
+// HIPANAO SOLUTIONS - Enrollment controller
+require_once("../../include/initialize.php");
+global $mydb;
+
+$action = (isset($_GET['action']) && $_GET['action'] != '') ? $_GET['action'] : '';
+
+switch ($action) {
+	case 'assign' :
+		doAssign();
+		break;
+
+	case 'section' :
+		doSectioning();
+		break;
+
+	case 'pay' :
+		doPayment();
+		break;
+
+	case 'enroll' :
+		doEnroll();
+		break;
+
+	case 'edit' :
+		doEdit();
+		break;
+
+	case 'delete' :
+		doDelete();
+		break;
+}
+
+
+/* ---------------------------------------------------------------------
+   Confirms that a section really belongs to the given course and school
+   year.
+   --------------------------------------------------------------------- */
+function sectionBelongsTo($sectionId, $courseId, $syId) {
+	global $mydb;
+	$mydb->setQuery("SELECT SECTION_ID FROM `tblsections` 
+		WHERE SECTION_ID = '".intval($sectionId)."' 
+		  AND COURSE_ID  = '".intval($courseId)."' 
+		  AND SY_ID      = '".intval($syId)."' 
+		LIMIT 1");
+	return ($mydb->num_rows() >= 1);
+}
+
+
+/* ---------------------------------------------------------------------
+   STAGE 1 -> 2: ASSIGN SUBJECTS
+   Replaces the enrollment's subject list with whatever was checked, then
+   recalculates AMOUNT_DUE from each subject's unit price. Re-running this
+   later (to add/drop a subject) only recalculates the amount - it does
+   not undo Sectioning/Payment progress already made.
+   --------------------------------------------------------------------- */
+function doAssign() {
+
+	global $mydb;
+
+	$EID = isset($_POST['A_EID']) ? intval($_POST['A_EID']) : 0;
+	$subjectIds = isset($_POST['SUBJECTS']) ? $_POST['SUBJECTS'] : array();
+
+	if ($EID <= 0) {
+		message("That enrollment record could not be found.", "error");
+		redirect('index.php');
+		return;
+	}
+
+	if (count($subjectIds) < 1) {
+		message("Please select at least one subject.", "error");
+		redirect('index.php');
+		return;
+	}
+
+	/* Wipe and rebuild the subject list for this enrollment. */
+	$mydb->InsertThis("DELETE FROM `tblenrollment_details` WHERE ENROLLMENT_ID = '".$EID."'");
+
+	$totalDue = 0;
+	foreach ($subjectIds as $sid) {
+		$sid = intval($sid);
+		if ($sid <= 0) { continue; }
+
+		$mydb->setQuery("SELECT SUBJECT_ID, UNITS, PRICE_PER_UNIT FROM `tblsubjects` WHERE SUBJECT_ID = '".$sid."' LIMIT 1");
+		$rows = $mydb->loadResultList();
+		if (count($rows) < 1) { continue; }
+
+		$mydb->InsertThis("INSERT INTO `tblenrollment_details` (ENROLLMENT_ID, SUBJECT_ID) VALUES ('".$EID."', '".$sid."')");
+		$totalDue += ($rows[0]->UNITS * $rows[0]->PRICE_PER_UNIT);
+	}
+
+	/* Only auto-advance the status the first time a record is assigned.
+	   If it is already further along (Sectioned, Paid, etc.), editing the
+	   subject list here should not roll that progress back. */
+	$mydb->setQuery("SELECT STATUS FROM `tblenrollment` WHERE ENROLLMENT_ID = '".$EID."' LIMIT 1");
+	$cur = $mydb->loadResultList();
+	$statusSql = '';
+	if (count($cur) >= 1 && $cur[0]->STATUS == 'Registered') {
+		$statusSql = ", `STATUS` = 'Assigned'";
+	}
+
+	$sql = "UPDATE `tblenrollment` SET `AMOUNT_DUE` = '".$totalDue."' ".$statusSql." WHERE `ENROLLMENT_ID` = '".$EID."'";
+
+	if ($mydb->InsertThis($sql)) {
+		message("Subjects assigned. Amount due: PHP ".number_format($totalDue, 2).".", "success");
+	} else {
+		message("The subject list could not be saved.", "error");
+	}
+	redirect('index.php');
+}
+
+
+/* ---------------------------------------------------------------------
+   STAGE 2 -> 3: SECTIONING
+   Only meaningful once subjects have been assigned.
+   --------------------------------------------------------------------- */
+function doSectioning() {
+
+	global $mydb;
+
+	$EID     = isset($_POST['SEC_EID'])     ? intval($_POST['SEC_EID'])     : 0;
+	$SECTION = isset($_POST['SEC_SECTION']) ? intval($_POST['SEC_SECTION']) : 0;
+
+	if ($EID <= 0 || $SECTION <= 0) {
+		message("Please choose a section.", "error");
+		redirect('index.php');
+		return;
+	}
+
+	$mydb->setQuery("SELECT COURSE_ID, SY_ID, STATUS FROM `tblenrollment` WHERE ENROLLMENT_ID = '".$EID."' LIMIT 1");
+	$rows = $mydb->loadResultList();
+	if (count($rows) < 1) {
+		message("That enrollment record no longer exists.", "error");
+		redirect('index.php');
+		return;
+	}
+	$rec = $rows[0];
+
+	if ($rec->STATUS == 'Registered') {
+		message("Assign subjects to this student before sectioning.", "error");
+		redirect('index.php');
+		return;
+	}
+
+	if (!sectionBelongsTo($SECTION, $rec->COURSE_ID, $rec->SY_ID)) {
+		message("That section does not belong to this student's course and academic year.", "error");
+		redirect('index.php');
+		return;
+	}
+
+	/* Sectioning does not finalize enrollment by itself anymore - Payment
+	   and Enroll still have to happen. Only move the status forward if it
+	   has not already progressed past this point. */
+	$statusSql = '';
+	if ($rec->STATUS == 'Assigned') {
+		$statusSql = ", `STATUS` = 'Sectioned'";
+	}
+
+	$sql = "UPDATE `tblenrollment` SET `SECTION_ID` = '".$SECTION."' ".$statusSql." WHERE `ENROLLMENT_ID` = '".$EID."'";
+
+	if ($mydb->InsertThis($sql)) {
+		message("Section saved.", "success");
+	} else {
+		message("Sectioning could not be saved.", "error");
+	}
+	redirect('index.php');
+}
+
+
+/* ---------------------------------------------------------------------
+   STAGE 4: PAYMENT
+   Logs a payment, updates the running total, and flips the record to
+   Paid once the balance reaches zero.
+   --------------------------------------------------------------------- */
+function doPayment() {
+
+	global $mydb;
+
+	$EID     = isset($_POST['P_EID'])     ? intval($_POST['P_EID'])              : 0;
+	$AMOUNT  = isset($_POST['P_AMOUNT'])  ? floatval($_POST['P_AMOUNT'])         : 0;
+	$OR      = isset($_POST['P_OR'])      ? trim($_POST['P_OR'])                 : '';
+	$CASHIER = isset($_POST['P_CASHIER']) ? trim($_POST['P_CASHIER'])            : '';
+
+	if ($EID <= 0 || $AMOUNT <= 0 || $CASHIER == '') {
+		message("Please fill in the amount and cashier name.", "error");
+		redirect('index.php');
+		return;
+	}
+
+	$mydb->setQuery("SELECT STATUS, AMOUNT_DUE, AMOUNT_PAID FROM `tblenrollment` WHERE ENROLLMENT_ID = '".$EID."' LIMIT 1");
+	$rows = $mydb->loadResultList();
+	if (count($rows) < 1) {
+		message("That enrollment record no longer exists.", "error");
+		redirect('index.php');
+		return;
+	}
+	$rec = $rows[0];
+
+	if ($rec->STATUS == 'Registered' || $rec->STATUS == 'Assigned') {
+		message("Complete sectioning before recording a payment.", "error");
+		redirect('index.php');
+		return;
+	}
+
+	$mydb->InsertThis("INSERT INTO `tblpayments` (ENROLLMENT_ID, AMOUNT, OR_NUMBER, CASHIER, DATE_PAID) 
+		VALUES ('".$EID."', '".$AMOUNT."', '".$mydb->escape_value($OR)."', '".$mydb->escape_value($CASHIER)."', CURDATE())");
+
+	$newPaid = $rec->AMOUNT_PAID + $AMOUNT;
+
+	/* Fully paid once the running total meets or exceeds what is due. */
+	$statusSql = '';
+	if ($newPaid >= $rec->AMOUNT_DUE && $rec->STATUS == 'Sectioned') {
+		$statusSql = ", `STATUS` = 'Paid'";
+	}
+
+	$sql = "UPDATE `tblenrollment` SET `AMOUNT_PAID` = '".$newPaid."' ".$statusSql." WHERE `ENROLLMENT_ID` = '".$EID."'";
+
+	if ($mydb->InsertThis($sql)) {
+		if ($newPaid >= $rec->AMOUNT_DUE) {
+			message("Payment recorded. Balance fully paid - the student can now be enrolled.", "success");
+		} else {
+			$balance = $rec->AMOUNT_DUE - $newPaid;
+			message("Payment recorded. Remaining balance: PHP ".number_format($balance, 2).".", "success");
+		}
+	} else {
+		message("The payment could not be saved.", "error");
+	}
+	redirect('index.php');
+}
+
+
+/* ---------------------------------------------------------------------
+   STAGE 5 -> 6: ENROLL
+   The final step. Locked until the balance is fully paid.
+   --------------------------------------------------------------------- */
+function doEnroll() {
+
+	global $mydb;
+
+	$id = isset($_GET['id']) ? intval($_GET['id']) : 0;
+
+	if ($id <= 0) {
+		message("No enrollment record selected.", "error");
+		redirect('index.php');
+		return;
+	}
+
+	$mydb->setQuery("SELECT STATUS FROM `tblenrollment` WHERE ENROLLMENT_ID = '".$id."' LIMIT 1");
+	$rows = $mydb->loadResultList();
+	if (count($rows) < 1) {
+		message("That enrollment record no longer exists.", "error");
+		redirect('index.php');
+		return;
+	}
+
+	if ($rows[0]->STATUS != 'Paid') {
+		message("This student has to pay first before they can be enrolled.", "error");
+		redirect('index.php');
+		return;
+	}
+
+	$sql = "UPDATE `tblenrollment` SET `STATUS` = 'Enrolled', `DATE_ENROLLED` = CURDATE() WHERE `ENROLLMENT_ID` = '".$id."'";
+
+	if ($mydb->InsertThis($sql)) {
+		message("Student is now officially enrolled.", "success");
+	} else {
+		message("Enrollment could not be finalized.", "error");
+	}
+	redirect('index.php');
+}
+
+
+/* ---------------------------------------------------------------------
+   EDIT an existing enrollment record
+   --------------------------------------------------------------------- */
+function doEdit() {
+
+	global $mydb;
+
+	$EID        = isset($_POST['E_EID'])            ? intval($_POST['E_EID'])           : 0;
+	$SY_ID      = isset($_POST['E_SY'])             ? intval($_POST['E_SY'])            : 0;
+	$COURSE_ID  = isset($_POST['E_COURSE'])         ? intval($_POST['E_COURSE'])        : 0;
+	$SECTION_ID = isset($_POST['E_SECTION'])        ? intval($_POST['E_SECTION'])       : 0;
+	$YEAR_LEVEL = isset($_POST['E_YEARLEVEL'])      ? trim($_POST['E_YEARLEVEL'])       : '';
+	$SEMESTER   = isset($_POST['E_SEMESTER'])       ? trim($_POST['E_SEMESTER'])        : '';
+	$CATEGORY   = isset($_POST['E_CATEGORY'])       ? trim($_POST['E_CATEGORY'])        : 'New';
+	$CURRICULUM = isset($_POST['E_CURRICULUM'])     ? trim($_POST['E_CURRICULUM'])      : '';
+	$STATUS     = isset($_POST['E_STATUS'])         ? trim($_POST['E_STATUS'])          : 'Registered';
+	$RESERVED   = isset($_POST['E_DATE_RESERVED'])  ? trim($_POST['E_DATE_RESERVED'])   : '';
+	$ENROLLED   = isset($_POST['E_DATE_ENROLLED'])  ? trim($_POST['E_DATE_ENROLLED'])   : '';
+
+	if ($EID <= 0 || $SY_ID <= 0 || $COURSE_ID <= 0 || $YEAR_LEVEL == '' || $SEMESTER == '') {
+		message("Please complete all the required fields.", "error");
+		redirect('index.php');
+		return;
+	}
+
+	if ($SECTION_ID > 0 && !sectionBelongsTo($SECTION_ID, $COURSE_ID, $SY_ID)) {
+		message("That section does not belong to the selected course and academic year.", "error");
+		redirect('index.php');
+		return;
+	}
+
+	$mydb->setQuery("SELECT S_ID FROM `tblenrollment` WHERE ENROLLMENT_ID = '".$EID."' LIMIT 1");
+	$owner = $mydb->loadResultList();
+	if (count($owner) < 1) {
+		message("That enrollment record no longer exists.", "error");
+		redirect('index.php');
+		return;
+	}
+	$S_ID = $owner[0]->S_ID;
+
+	$mydb->setQuery("SELECT ENROLLMENT_ID FROM `tblenrollment` 
+		WHERE S_ID     = '".$S_ID."' 
+		  AND SY_ID    = '".$SY_ID."' 
+		  AND SEMESTER = '".$mydb->escape_value($SEMESTER)."' 
+		  AND ENROLLMENT_ID <> '".$EID."' 
+		LIMIT 1");
+	if ($mydb->num_rows() >= 1) {
+		message("This student already has another record for that academic year and semester.", "error");
+		redirect('index.php');
+		return;
+	}
+
+	$sectionSql    = ($SECTION_ID > 0) ? "'".$SECTION_ID."'" : "NULL";
+	$curriculumSql = ($CURRICULUM == '') ? "NULL" : "'".$mydb->escape_value($CURRICULUM)."'";
+	$reservedSql   = ($RESERVED == '')   ? "NULL" : "'".$mydb->escape_value($RESERVED)."'";
+	$enrolledSql   = ($ENROLLED == '')   ? "NULL" : "'".$mydb->escape_value($ENROLLED)."'";
+
+	$sql = "UPDATE `tblenrollment` SET 
+			`COURSE_ID`     = '".$COURSE_ID."', 
+			`SECTION_ID`    = ".$sectionSql.", 
+			`SY_ID`         = '".$SY_ID."', 
+			`YEAR_LEVEL`    = '".$mydb->escape_value($YEAR_LEVEL)."', 
+			`SEMESTER`      = '".$mydb->escape_value($SEMESTER)."', 
+			`CATEGORY`      = '".$mydb->escape_value($CATEGORY)."', 
+			`CURRICULUM_YR` = ".$curriculumSql.", 
+			`DATE_RESERVED` = ".$reservedSql.", 
+			`DATE_ENROLLED` = ".$enrolledSql.", 
+			`STATUS`        = '".$mydb->escape_value($STATUS)."' 
+		WHERE `ENROLLMENT_ID` = '".$EID."'";
+
+	if ($mydb->InsertThis($sql)) {
+		message("Enrollment record updated.", "success");
+	} else {
+		message("The enrollment record could not be updated.", "error");
+	}
+	redirect('index.php');
+}
+
+
+function doDelete() {
+
+	global $mydb;
+
+	$id = isset($_GET['id']) ? intval($_GET['id']) : 0;
+
+	if ($id <= 0) {
+		message("No enrollment record selected.", "error");
+		redirect('index.php');
+		return;
+	}
+
+	$mydb->setQuery("SELECT DETAIL_ID FROM `tblenrollment_details` WHERE ENROLLMENT_ID = '".$id."'");
+	$subjects = $mydb->num_rows();
+	$mydb->setQuery("SELECT GRADE_ID FROM `tblgrades` WHERE ENROLLMENT_ID = '".$id."'");
+	$grades = $mydb->num_rows();
+	$mydb->setQuery("SELECT PAYMENT_ID FROM `tblpayments` WHERE ENROLLMENT_ID = '".$id."'");
+	$payments = $mydb->num_rows();
+
+	$mydb->InsertThis("DELETE FROM `tblenrollment_details` WHERE ENROLLMENT_ID = '".$id."'");
+	$mydb->InsertThis("DELETE FROM `tblgrades` WHERE ENROLLMENT_ID = '".$id."'");
+	$mydb->InsertThis("DELETE FROM `tblpayments` WHERE ENROLLMENT_ID = '".$id."'");
+
+	if ($mydb->InsertThis("DELETE FROM `tblenrollment` WHERE `ENROLLMENT_ID` = '".$id."'")) {
+		$extra = '';
+		if ($subjects > 0 || $grades > 0 || $payments > 0) {
+			$extra = " ".$subjects." subject(s), ".$grades." grade(s), and ".$payments." payment record(s) were removed with it.";
+		}
+		message("Enrollment record deleted.".$extra, "info");
+	} else {
+		message("The enrollment record could not be deleted.", "error");
+	}
+	redirect('index.php');
+}
+?>
+
+
+========================================================================
+ PART 4: SUPPORTING PHP CLASSES (include/)
+ Used by the Enrollment module's Edit form to populate dropdowns
+========================================================================
+
+------------------------------------------------------------------------
+ include/course.php
+------------------------------------------------------------------------
+<?php
+require_once(LIB_PATH.DS.'database.php');
+class Course{
+	
+	protected static $tbl_name = "tblcourses";
+	function db_fields(){
+		global $mydb;
+		return $mydb->getFieldsOnOneTable(self::$tbl_name);
+	}
+	function listOfUsers(){
+		global $mydb;
+		$mydb->setQuery("Select * from ".self::$tbl_name);
+		$cur = $mydb->loadResultList();
+		return $cur;
+	
+	}
+	function find_all_course_code($code=""){
+			global $mydb;
+			$mydb->setQuery("SELECT * 
+							FROM  ".self::$tbl_name." 
+							WHERE  `course_code` ='{$code}'");
+			$row_count = $mydb->num_rows();
+			return $row_count;
+	}
+
+	/*---Instantiation of Object dynamically---*/
+	static function instantiate($record) {
+		$object = new self;
+
+		foreach($record as $attribute=>$value){
+		  if($object->has_attribute($attribute)) {
+		    $object->$attribute = $value;
+		  }
+		} 
+		return $object;
+	}
+	
+	
+	/*--Cleaning the raw data before submitting to Database--*/
+	private function has_attribute($attribute) {
+	  return array_key_exists($attribute, $this->attributes());
+	}
+
+	protected function attributes() { 
+	  global $mydb;
+	  $attributes = array();
+	  foreach($this->db_fields() as $field) {
+	    if(property_exists($this, $field)) {
+			$attributes[$field] = $this->$field;
+		}
+	  }
+	  return $attributes;
+	}
+	
+	protected function sanitized_attributes() {
+	  global $mydb;
+	  $clean_attributes = array();
+	  foreach($this->attributes() as $key => $value){
+	    $clean_attributes[$key] = $mydb->escape_value($value);
+	  }
+	  return $clean_attributes;
+	}
+	
+	/*--Create,Update and Delete methods--*/
+	public function save() {
+	  return isset($this->id) ? $this->update() : $this->create();
+	}
+	
+	public function create() {
+		global $mydb;
+		$attributes = $this->sanitized_attributes();
+		$sql = "INSERT INTO ".self::$tbl_name." (";
+		$sql .= join(", ", array_keys($attributes));
+		$sql .= ") VALUES ('";
+		$sql .= join("', '", array_values($attributes));
+		$sql .= "')";
+		return	$mydb->InsertThis($sql);
+	}
+
+	public function update($id=0) {
+	  global $mydb;
+		$attributes = $this->sanitized_attributes();
+		$attribute_pairs = array();
+		foreach($attributes as $key => $value) {
+		  $attribute_pairs[] = "{$key}='{$value}'";
+		}
+		$sql = "UPDATE ".self::$tbl_name." SET ";
+		$sql .= join(", ", $attribute_pairs);
+		$sql .= " WHERE course_id =". $id;
+		return  $mydb->InsertThis($sql);
+	 	
+	}
+
+	public function delete($id=0) {
+		global $mydb;
+		  $sql = "DELETE FROM ".self::$tbl_name;
+		  $sql .= " WHERE course_id =". $id;
+		  $sql .= " LIMIT 1 ";
+		return  $mydb->InsertThis($sql);
+		  
+	}
+		
+}
+?>
+
+------------------------------------------------------------------------
+ include/schoolyear.php
+------------------------------------------------------------------------
+<?php
+require_once(LIB_PATH.DS.'database.php');
+class SchoolYear{
+	
+	protected static $tbl_name = "tblschoolyear";
+	function db_fields(){
+		global $mydb;
+		return $mydb->getFieldsOnOneTable(self::$tbl_name);
+	}
+	function listOfUsers(){
+		global $mydb;
+		$mydb->setQuery("Select * from ".self::$tbl_name);
+		$cur = $mydb->loadResultList();
+		return $cur;
+	
+	}
+	function find_all_school_year($sy=""){
+			global $mydb;
+			$mydb->setQuery("SELECT * 
+							FROM  ".self::$tbl_name." 
+							WHERE  `school_year` ='{$sy}'");
+			$row_count = $mydb->num_rows();
+			return $row_count;
+	}
+
+	static function instantiate($record) {
+		$object = new self;
+		foreach($record as $attribute=>$value){
+		  if($object->has_attribute($attribute)) {
+		    $object->$attribute = $value;
+		  }
+		} 
+		return $object;
+	}
+	
+	private function has_attribute($attribute) {
+	  return array_key_exists($attribute, $this->attributes());
+	}
+
+	protected function attributes() { 
+	  global $mydb;
+	  $attributes = array();
+	  foreach($this->db_fields() as $field) {
+	    if(property_exists($this, $field)) {
+			$attributes[$field] = $this->$field;
+		}
+	  }
+	  return $attributes;
+	}
+	
+	protected function sanitized_attributes() {
+	  global $mydb;
+	  $clean_attributes = array();
+	  foreach($this->attributes() as $key => $value){
+	    $clean_attributes[$key] = $mydb->escape_value($value);
+	  }
+	  return $clean_attributes;
+	}
+	
+	public function save() {
+	  return isset($this->id) ? $this->update() : $this->create();
+	}
+	
+	public function create() {
+		global $mydb;
+		$attributes = $this->sanitized_attributes();
+		$sql = "INSERT INTO ".self::$tbl_name." (";
+		$sql .= join(", ", array_keys($attributes));
+		$sql .= ") VALUES ('";
+		$sql .= join("', '", array_values($attributes));
+		$sql .= "')";
+		return	$mydb->InsertThis($sql);
+	}
+
+	public function update($id=0) {
+	  global $mydb;
+		$attributes = $this->sanitized_attributes();
+		$attribute_pairs = array();
+		foreach($attributes as $key => $value) {
+		  $attribute_pairs[] = "{$key}='{$value}'";
+		}
+		$sql = "UPDATE ".self::$tbl_name." SET ";
+		$sql .= join(", ", $attribute_pairs);
+		$sql .= " WHERE sy_id =". $id;
+		return  $mydb->InsertThis($sql);
+	 	
+	}
+
+	public function delete($id=0) {
+		global $mydb;
+		  $sql = "DELETE FROM ".self::$tbl_name;
+		  $sql .= " WHERE sy_id =". $id;
+		  $sql .= " LIMIT 1 ";
+		return  $mydb->InsertThis($sql);
+		  
+	}
+		
+}
+?>
+
+========================================================================
+ END OF SOURCE CODE APPENDIX
+========================================================================
